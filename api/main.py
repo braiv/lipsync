@@ -12,6 +12,11 @@ from facefusion.filesystem import is_image, is_video
 import facefusion.state_manager as state_manager
 from pydantic import BaseModel
 
+# Server configuration
+SERVER_HOST = "0.0.0.0"  # Bind to all interfaces
+SERVER_PORT = 8000
+VM_IP = "10.148.0.2"  # Your VM's IP address
+
 
 class TaskStatus(BaseModel):
     status: str
@@ -30,7 +35,7 @@ class TaskResponse(BaseModel):
 
 app = FastAPI(
     title="Lipsync API",
-    description="""
+    description=f"""
     A powerful API for lipsync processing that combines video and audio files to create synchronized output.
     
     ## Features
@@ -43,9 +48,13 @@ app = FastAPI(
     * `/lipsync/process` - Upload and process files
     * `/lipsync/status/{task_id}` - Check processing status
     
+    ## Access Points
+    * API Documentation: http://{VM_IP}:{SERVER_PORT}/docs
+    * Web Interface: http://{VM_IP}:{SERVER_PORT}/static/index.html
+    
     ## Example
     ```bash
-    curl -X POST "http://localhost:8000/lipsync/process" \\
+    curl -X POST "http://{VM_IP}:{SERVER_PORT}/lipsync/process" \\
       -H "accept: application/json" \\
       -H "Content-Type: multipart/form-data" \\
       -F "video=@input.mp4" \\
@@ -264,4 +273,8 @@ app.openapi = custom_openapi
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print(f"Starting server on {SERVER_HOST}:{SERVER_PORT}")
+    print(f"Access the API at: http://{VM_IP}:{SERVER_PORT}")
+    print(f"API Documentation: http://{VM_IP}:{SERVER_PORT}/docs")
+    print(f"Web Interface: http://{VM_IP}:{SERVER_PORT}/static/index.html")
+    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
