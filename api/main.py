@@ -46,7 +46,7 @@ app = FastAPI(
     
     ## Endpoints
     * `/lipsync/process` - Upload and process files
-    * `/lipsync/status/{task_id}` - Check processing status
+    * `/lipsync/status/task_id` - Check processing status
     
     ## Access Points
     * API Documentation: http://{VM_IP}:{SERVER_PORT}/docs
@@ -131,9 +131,9 @@ async def root():
 )
 async def process_lipsync(
     background_tasks: BackgroundTasks,
-    video: UploadFile = File(..., description="Video file containing the face"),
-    audio: UploadFile = File(..., description="Audio file to sync with the video"),
-) -> TaskResponse:
+    video: UploadFile = File(...),
+    audio: UploadFile = File(...),
+):
     try:
         task_id = str(uuid.uuid4())
 
@@ -156,9 +156,11 @@ async def process_lipsync(
 
         background_tasks.add_task(process_task, task_id, video_path, audio_path)
 
-        return TaskResponse(
-            status="success", message="Processing started", task_id=task_id
-        )
+        return {
+            "status": "success",
+            "message": "Processing started",
+            "task_id": task_id,
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
