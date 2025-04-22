@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Lipsync API Interface</title>
+		<link rel="stylesheet" href="styles.css" />
+	</head>
+	<body>
+		<div class="container">
+			<header>
+				<h1>Lipsync API Interface</h1>
+			</header>
+
+			<main>
+				<div class="upload-section">
+					<h2>Upload Files</h2>
+					<form id="uploadForm">
+						<div class="file-input-group">
+							<label for="videoFile">Video File:</label>
+							<input
+								type="file"
+								id="videoFile"
+								accept="video/*"
+								required
+							/>
+						</div>
+						<div class="file-input-group">
+							<label for="audioFile">Audio File:</label>
+							<input
+								type="file"
+								id="audioFile"
+								accept="audio/*"
+								required
+							/>
+						</div>
+						<button type="submit" class="upload-button">
+							Start Processing
+						</button>
+					</form>
+				</div>
+
+				<div
+					class="status-section"
+					id="statusSection"
+					style="display: none"
+				>
+					<h2>Processing Status</h2>
+					<div class="status-container">
+						<div class="progress-bar">
+							<div class="progress" id="progressBar"></div>
+						</div>
+						<p class="status-text" id="statusText">Processing...</p>
+					</div>
+					<div
+						class="result-section"
+						id="resultSection"
+						style="display: none"
+					>
+						<h3>Processing Complete!</h3>
+						<video
+							id="resultVideo"
+							controls
+							style="display: none"
+						></video>
+						<img id="resultImage" style="display: none" />
+						<a id="downloadLink" class="download-button"
+							>Download Result</a
+						>
+					</div>
+				</div>
+			</main>
+		</div>
+		<script src="script.js"></script>
+	</body>
+</html>
