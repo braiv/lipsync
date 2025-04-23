@@ -119,6 +119,10 @@ conda install -y conda-forge::cuda-runtime=12.8.0 conda-forge::cudnn=9.7.1.26
 echo "📦 Installing TensorRT..."
 pip install tensorrt==10.8.0.43 --extra-index-url https://pypi.nvidia.com
 
+# Install ONNX Runtime with CUDA support
+echo "📦 Installing ONNX Runtime with CUDA support..."
+python install.py --onnxruntime cuda
+
 echo "🎉 Setup complete! Use 'conda activate $ENV_NAME' to start working."
 
 # Optional: Reboot to ensure NVIDIA stack is fully active
