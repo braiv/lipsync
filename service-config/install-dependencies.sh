@@ -111,6 +111,14 @@ conda activate "$ENV_NAME"
 echo "⬆️ Upgrading pip..."
 pip install --upgrade pip
 
+# Install CUDA runtime and cuDNN
+echo "📦 Installing CUDA runtime and cuDNN..."
+conda install -y conda-forge::cuda-runtime=12.8.0 conda-forge::cudnn=9.7.1.26
+
+# Install TensorRT
+echo "📦 Installing TensorRT..."
+pip install tensorrt==10.8.0.43 --extra-index-url https://pypi.nvidia.com
+
 echo "🎉 Setup complete! Use 'conda activate $ENV_NAME' to start working."
 
 # Optional: Reboot to ensure NVIDIA stack is fully active
