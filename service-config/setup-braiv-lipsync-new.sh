@@ -39,7 +39,7 @@ Before=braiv-lipsync.service
 [Service]
 Type=oneshot
 ExecStart=/bin/bash /opt/braiv-lipsync/service-config/update-braiv-lipsync.sh
-WorkingDirectory=/opt/braiv-lipsync
+WorkingDirectory=/home/cody_braiv_co/braiv-lipsync
 User=$REAL_USER
 Group=$REAL_USER
 RemainAfterExit=yes
@@ -59,7 +59,7 @@ Requires=update-braiv-lipsync.service
 
 [Service]
 ExecStart=/bin/bash /opt/braiv-pipeline/service-config/start-braiv-pipeline.sh $ENV
-WorkingDirectory=/opt/braiv-lipsync
+WorkingDirectory=/home/cody_braiv_co/braiv-lipsync
 User=$REAL_USER
 Group=$REAL_USER
 Restart=always
