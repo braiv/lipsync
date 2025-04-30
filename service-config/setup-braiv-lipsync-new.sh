@@ -38,7 +38,7 @@ Before=braiv-lipsync.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash /home/cody_braiv_co/braiv-lipsync/service-config/update-braiv-lipsync-new.sh
+ExecStart=/bin/bash /home/cody_braiv_co/braiv-lipsync/service-config/update-braiv-lipsync.sh
 WorkingDirectory=/home/cody_braiv_co/braiv-lipsync
 User=$REAL_USER
 Group=$REAL_USER
