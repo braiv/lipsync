@@ -55,8 +55,7 @@ echo "🔧 Creating or updating $MAIN_SERVICE..."
 cat <<EOF > "$MAIN_SERVICE"
 [Unit]
 Description=Braiv Lipsync Main Service
-After=update-braiv-lipsync.service
-Requires=update-braiv-lipsync.service
+After=network.target
 
 [Service]
 ExecStart=/bin/bash /home/cody_braiv_co/braiv-lipsync/service-config/start-braiv-lipsync-new.sh dev
