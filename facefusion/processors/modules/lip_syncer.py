@@ -69,6 +69,26 @@ def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
 				}
 			},
 			'size': (96, 96)
+		},
+		'latentsync':
+		{
+			'hashes':
+			{
+				'lip_syncer':
+				{
+					'url': resolve_download_url('models-3.0.0', 'latentsync.hash'),
+					'path': resolve_relative_path('../.assets/models/latentsync.hash')
+				}
+			},
+			'sources':
+			{
+				'lip_syncer':
+				{
+					'url': resolve_download_url('models-3.0.0', 'latentsync.onnx'),
+					'path': resolve_relative_path('../.assets/models/latentsync.onnx')
+				}
+			},
+			'size': (256, 256)
 		}
 	}
 
@@ -167,13 +187,26 @@ def sync_lip(target_face : Face, temp_audio_frame : AudioFrame, temp_vision_fram
 
 def forward(temp_audio_frame : AudioFrame, close_vision_frame : VisionFrame) -> VisionFrame:
 	lip_syncer = get_inference_pool().get('lip_syncer')
+	model_name = state_manager.get_item('lip_syncer_model')
 
 	with conditional_thread_semaphore():
-		close_vision_frame = lip_syncer.run(None,
-		{
-			'source': temp_audio_frame,
-			'target': close_vision_frame
-		})[0]
+		if model_name == 'latentsync':
+			# LatentSync specific processing
+			temp_audio_frame = prepare_latentsync_audio(temp_audio_frame)
+			close_vision_frame = prepare_latentsync_frame(close_vision_frame)
+			close_vision_frame = lip_syncer.run(None,
+			{
+				'source': temp_audio_frame,
+				'target': close_vision_frame
+			})[0]
+			close_vision_frame = normalize_latentsync_frame(close_vision_frame)
+		else:
+			# WAV2LIP processing
+			close_vision_frame = lip_syncer.run(None,
+			{
+				'source': temp_audio_frame,
+				'target': close_vision_frame
+			})[0]
 
 	return close_vision_frame
 
@@ -200,6 +233,40 @@ def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 	crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
 	crop_vision_frame = crop_vision_frame.astype(numpy.uint8)
 	return crop_vision_frame
+
+
+def prepare_latentsync_audio(temp_audio_frame : AudioFrame) -> AudioFrame:
+	# LatentSync specific audio preprocessing
+	# Convert to mel spectrogram with specific parameters
+	temp_audio_frame = numpy.log10(numpy.maximum(temp_audio_frame, 1e-5))
+	temp_audio_frame = (temp_audio_frame - temp_audio_frame.mean()) / temp_audio_frame.std()
+	temp_audio_frame = temp_audio_frame.astype(numpy.float32)
+	
+	# Reshape for LatentSync's expected input format
+	temp_audio_frame = numpy.expand_dims(temp_audio_frame, axis=(0, 1))
+	
+	# Ensure correct dimensions (80 mel bands, 16 time steps)
+	if temp_audio_frame.shape[2] != 80 or temp_audio_frame.shape[3] != 16:
+		temp_audio_frame = cv2.resize(temp_audio_frame[0, 0], (16, 80))
+		temp_audio_frame = numpy.expand_dims(numpy.expand_dims(temp_audio_frame, axis=0), axis=0)
+	
+	return temp_audio_frame
+
+
+def prepare_latentsync_frame(close_vision_frame : VisionFrame) -> VisionFrame:
+	# LatentSync specific preprocessing
+	close_vision_frame = cv2.resize(close_vision_frame, (256, 256))
+	close_vision_frame = numpy.expand_dims(close_vision_frame, axis = 0)
+	close_vision_frame = close_vision_frame.transpose(0, 3, 1, 2).astype('float32') / 255.0
+	return close_vision_frame
+
+
+def normalize_latentsync_frame(close_vision_frame : VisionFrame) -> VisionFrame:
+	# LatentSync specific normalization
+	close_vision_frame = close_vision_frame[0].transpose(1, 2, 0)
+	close_vision_frame = close_vision_frame.clip(0, 1) * 255
+	close_vision_frame = close_vision_frame.astype(numpy.uint8)
+	return close_vision_frame
 
 
 def get_reference_frame(source_face : Face, target_face : Face, temp_vision_frame : VisionFrame) -> VisionFrame:
