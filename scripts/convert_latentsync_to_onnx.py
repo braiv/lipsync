@@ -5,9 +5,9 @@ from pathlib import Path
 import sys
 
 # Optional: Add the cloned LatentSync repo to PYTHONPATH if needed
-sys.path.append("path/to/LatentSync")  # Replace with actual path
+sys.path.append("/home/cody_braiv_co/latent-sync")
 
-from latentsync.models.latentsync import LatentSync
+from latentsync.models.unet import LatentSyncUNet
 
 def calculate_file_hash(file_path):
     sha256_hash = hashlib.sha256()
@@ -22,7 +22,7 @@ def convert_latentsync_to_onnx():
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     # Load model and weights
-    model = LatentSync(pretrained=False)
+    model = LatentSyncUNet()
     state_dict = torch.load(assets_dir / "latentsync_unet.pt", map_location="cpu")
     model.load_state_dict(state_dict)
     model.eval()
