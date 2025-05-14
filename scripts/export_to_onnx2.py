@@ -16,6 +16,10 @@ config_path = "/home/cody_braiv_co/latent-sync/configs/unet/stage2.yaml"
 ckpt_path = "/home/cody_braiv_co/latent-sync/checkpoints/latentsync_unet.pt"
 onnx_path = "/home/cody_braiv_co/braiv-lipsync/scripts/latentsync_unet.onnx"
 
+# ✅ Detect device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"🖥️  Using device: {device}")
+
 # 📄 Load YAML config
 print("📄 Loading config...")
 config = OmegaConf.load(config_path)
@@ -23,22 +27,22 @@ print("✅ Config loaded.")
 
 # 🧠 Initialize the model from config
 print("🧠 Initializing model...")
-model = UNet3DConditionModel(**config.model)
+model = UNet3DConditionModel(**config.model).to(device)
 print("✅ Model initialized.")
 
 # 📦 Load checkpoint and process state_dict
 print("📦 Loading checkpoint...")
-checkpoint = torch.load(ckpt_path, map_location="cpu")
+checkpoint = torch.load(ckpt_path, map_location=device)
 state_dict = checkpoint.get("state_dict", checkpoint)
 state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
 model.load_state_dict(state_dict)
 model.eval()
 print("✅ Checkpoint loaded and model ready.")
 
-# 🧪 Prepare dummy inputs (minimized size for fast test export)
+# 🧪 Prepare dummy inputs
 print("🔧 Creating dummy input...")
-sample_input = torch.randn(1, 13, 8, 64, 64)  # (B, C, T, H, W)
-timesteps = torch.tensor([10])
+sample_input = torch.randn(1, 13, 8, 64, 64).to(device)  # (B, C, T, H, W)
+timesteps = torch.tensor([10]).to(device)
 print("✅ Dummy input created.")
 
 # ✅ Optional: Test forward pass before export
@@ -56,26 +60,26 @@ print(f"📤 Exporting to ONNX: {onnx_path}")
 start = time.time()
 with torch.no_grad():
     torch.onnx.export(
-    model,
-    (sample_input, timesteps),
-    onnx_path,
-    input_names=["sample", "timesteps"],
-    output_names=["output"],
-    dynamic_axes={
-        "sample": {
-            0: "batch_size",     # Dynamic
-            2: "num_frames",     # Dynamic
-            # 3: "height",       # Optional — only if you test it
-            # 4: "width"         # Optional — only if you test it
+        model,
+        (sample_input, timesteps),
+        onnx_path,
+        input_names=["sample", "timesteps"],
+        output_names=["output"],
+        dynamic_axes={
+            "sample": {
+                0: "batch_size",
+                2: "num_frames",
+                # 3: "height",       # Optional — only if you test it
+                # 4: "width"         # Optional — only if you test it
+            },
+            "output": {
+                0: "batch_size",
+                2: "num_frames",
+                # 3: "height",
+                # 4: "width"
+            }
         },
-        "output": {
-            0: "batch_size",
-            2: "num_frames",
-            # 3: "height",
-            # 4: "width"
-        }
-    },
-    opset_version=17,
+        opset_version=17,
     )
 print(f"✅ Export complete: {onnx_path}")
 print(f"⏱️ Time taken: {round(time.time() - start, 2)} seconds")
