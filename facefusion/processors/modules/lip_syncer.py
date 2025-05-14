@@ -4,6 +4,7 @@ from typing import List
 
 import cv2
 import numpy
+import torch
 
 import facefusion.jobs.job_manager
 import facefusion.jobs.job_store
@@ -25,6 +26,10 @@ from facefusion.thread_helper import conditional_thread_semaphore
 from facefusion.typing import ApplyStateItem, Args, AudioFrame, DownloadScope, Face, InferencePool, ModelOptions, ModelSet, ProcessMode, QueuePayload, UpdateProgress, VisionFrame
 from facefusion.vision import read_image, read_static_image, restrict_video_fps, write_image
 
+from diffusers.models import AutoencoderKL
+
+# Load VAE (Stable Diffusion 1.5 compatible)
+vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to("cuda").eval()
 
 @lru_cache(maxsize = None)
 def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
@@ -185,30 +190,35 @@ def sync_lip(target_face : Face, temp_audio_frame : AudioFrame, temp_vision_fram
 	return paste_vision_frame
 
 
-def forward(temp_audio_frame : AudioFrame, close_vision_frame : VisionFrame) -> VisionFrame:
-	lip_syncer = get_inference_pool().get('lip_syncer')
-	model_name = state_manager.get_item('lip_syncer_model')
+def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> VisionFrame:
+    lip_syncer = get_inference_pool().get('lip_syncer')
+    model_name = state_manager.get_item('lip_syncer_model')
 
-	with conditional_thread_semaphore():
-		if model_name == 'latentsync':
-			# LatentSync specific processing
-			temp_audio_frame = prepare_latentsync_audio(temp_audio_frame)
-			close_vision_frame = prepare_latentsync_frame(close_vision_frame)
-			close_vision_frame = lip_syncer.run(None,
-			{
-				'source': temp_audio_frame,
-				'target': close_vision_frame
-			})[0]
-			close_vision_frame = normalize_latentsync_frame(close_vision_frame)
-		else:
-			# WAV2LIP processing
-			close_vision_frame = lip_syncer.run(None,
-			{
-				'source': temp_audio_frame,
-				'target': close_vision_frame
-			})[0]
+    with conditional_thread_semaphore():
+        if model_name == 'latentsync':
+            try:
+                with torch.no_grad():
+                    audio_tensor = prepare_latentsync_audio(temp_audio_frame)
+                    video_tensor = prepare_latentsync_frame(close_vision_frame).unsqueeze(2)
+                    output_latent = lip_syncer.run(None, {
+                        'source': audio_tensor,
+                        'target': video_tensor
+                    })[0]
+                    # Convert numpy array to torch tensor if needed
+                    if isinstance(output_latent, numpy.ndarray):
+                        output_latent = torch.from_numpy(output_latent).to("cuda")
+                    close_vision_frame = normalize_latentsync_frame(output_latent)
+            except Exception as e:
+                logger.error(f"LatentSync processing failed: {str(e)}")
+                return close_vision_frame
+        else:
+            # Wav2Lip-style direct inference with image and mel-spectrogram
+            close_vision_frame = lip_syncer.run(None, {
+                'source': temp_audio_frame,
+                'target': close_vision_frame
+            })[0]
 
-	return close_vision_frame
+    return close_vision_frame
 
 
 def prepare_audio_frame(temp_audio_frame : AudioFrame) -> AudioFrame:
@@ -235,38 +245,68 @@ def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 	return crop_vision_frame
 
 
-def prepare_latentsync_audio(temp_audio_frame : AudioFrame) -> AudioFrame:
-	# LatentSync specific audio preprocessing
-	# Convert to mel spectrogram with specific parameters
-	temp_audio_frame = numpy.log10(numpy.maximum(temp_audio_frame, 1e-5))
-	temp_audio_frame = (temp_audio_frame - temp_audio_frame.mean()) / temp_audio_frame.std()
-	temp_audio_frame = temp_audio_frame.astype(numpy.float32)
-	
-	# Reshape for LatentSync's expected input format
-	temp_audio_frame = numpy.expand_dims(temp_audio_frame, axis=(0, 1))
-	
-	# Ensure correct dimensions (80 mel bands, 16 time steps)
-	if temp_audio_frame.shape[2] != 80 or temp_audio_frame.shape[3] != 16:
-		temp_audio_frame = cv2.resize(temp_audio_frame[0, 0], (16, 80))
-		temp_audio_frame = numpy.expand_dims(numpy.expand_dims(temp_audio_frame, axis=0), axis=0)
-	
-	return temp_audio_frame
+# Prepare audio for LatentSync: log-mel normalization + reshape to (1, 13, 8, 64, 64)
+def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
+    if not isinstance(temp_audio_frame, numpy.ndarray):
+        raise TypeError("Input must be a numpy array")
+    
+    try:
+        frame = numpy.log10(numpy.maximum(temp_audio_frame, 1e-5))
+        frame = (frame - frame.mean()) / frame.std()
+        frame = frame.astype(numpy.float32)
+        
+        if frame.shape[0] < 13:
+            pad_len = 13 - frame.shape[0]
+            padding = numpy.zeros((pad_len, *frame.shape[1:]), dtype=numpy.float32)
+            frame = numpy.concatenate([frame, padding], axis=0)
+        elif frame.shape[0] > 13:
+            frame = frame[:13]
+            
+        frame = frame.reshape(1, 13, 8, 64, 64)
+        tensor = torch.from_numpy(frame)
+        return tensor.cuda() if torch.cuda.is_available() else tensor
+    except Exception as e:
+        raise RuntimeError(f"Failed to prepare audio: {str(e)}")
 
 
-def prepare_latentsync_frame(close_vision_frame : VisionFrame) -> VisionFrame:
-	# LatentSync specific preprocessing
-	close_vision_frame = cv2.resize(close_vision_frame, (256, 256))
-	close_vision_frame = numpy.expand_dims(close_vision_frame, axis = 0)
-	close_vision_frame = close_vision_frame.transpose(0, 3, 1, 2).astype('float32') / 255.0
-	return close_vision_frame
+# Prepare video frame for LatentSync: resize, normalize, encode with VAE → latent shape (1, 4, 64, 64)
+def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
+    if not isinstance(vision_frame, numpy.ndarray):
+        raise TypeError("Input must be a numpy array")
+    
+    try:
+        frame = cv2.resize(vision_frame, (512, 512))
+        frame = frame.astype(numpy.float32) / 255.0
+        frame = (frame * 2.0) - 1.0
+        frame = numpy.transpose(frame, (2, 0, 1))
+        frame = numpy.expand_dims(frame, axis=0)
+        img_tensor = torch.from_numpy(frame)
+        img_tensor = img_tensor.cuda() if torch.cuda.is_available() else img_tensor
+
+        with torch.no_grad():
+            latent = vae.encode(img_tensor).latent_dist.sample() * 0.18215
+
+        return latent
+    except Exception as e:
+        raise RuntimeError(f"Failed to prepare frame: {str(e)}")
 
 
-def normalize_latentsync_frame(close_vision_frame : VisionFrame) -> VisionFrame:
-	# LatentSync specific normalization
-	close_vision_frame = close_vision_frame[0].transpose(1, 2, 0)
-	close_vision_frame = close_vision_frame.clip(0, 1) * 255
-	close_vision_frame = close_vision_frame.astype(numpy.uint8)
-	return close_vision_frame
+# Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
+def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
+    if not isinstance(latent, torch.Tensor):
+        raise TypeError("Input must be a torch tensor")
+    
+    try:
+        with torch.no_grad():
+            decoded = vae.decode(latent / 0.18215).sample
+
+        decoded = (decoded.clamp(-1, 1) + 1) / 2.0
+        decoded = (decoded * 255).to(torch.uint8)
+        decoded = decoded[0].permute(1, 2, 0)
+        
+        return decoded.cpu().numpy() if torch.cuda.is_available() else decoded.numpy()
+    except Exception as e:
+        raise RuntimeError(f"Failed to normalize frame: {str(e)}")
 
 
 def get_reference_frame(source_face : Face, target_face : Face, temp_vision_frame : VisionFrame) -> VisionFrame:
