@@ -4,8 +4,8 @@ from pathlib import Path
 # ✅ Path to your ONNX model
 model_path = Path("latentsync_unet.onnx")
 
-# ✅ Output .hash file (same base name)
-hash_path = model_path.with_suffix(".onnx.hash")
+# ✅ Output hash file with just .hash extension
+hash_path = model_path.with_suffix("").with_suffix(".hash")
 
 # ✅ Read the file and calculate SHA256
 with open(model_path, "rb") as f:
