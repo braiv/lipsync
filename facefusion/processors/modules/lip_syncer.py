@@ -300,25 +300,34 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
 
 # Prepare video frame for LatentSync: resize, normalize, encode with VAE → latent shape (1, 4, 64, 64)
 def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
+    if vision_frame is None:
+        raise ValueError("❌ vision_frame is None.")
     if not isinstance(vision_frame, numpy.ndarray):
-        raise TypeError("Input must be a numpy array")
+        raise TypeError("❌ vision_frame is not a numpy array.")
+    if vision_frame.size == 0:
+        raise ValueError("❌ vision_frame is empty.")
     
+    print("🖼️ Raw vision_frame shape:", vision_frame.shape)
+
     try:
-        frame = cv2.resize(vision_frame, (512, 512))
+        frame = cv2.resize(vision_frame, (512, 512))  # 👈 this line was crashing
+        print("✅ Resized frame to 512x512")
+
         frame = frame.astype(numpy.float32) / 255.0
         frame = (frame * 2.0) - 1.0
-        frame = numpy.transpose(frame, (2, 0, 1))
-        frame = numpy.expand_dims(frame, axis=0)
-        img_tensor = torch.from_numpy(frame)
-        img_tensor = img_tensor.cuda() if torch.cuda.is_available() else img_tensor
+        frame = numpy.transpose(frame, (2, 0, 1))   # (C, H, W)
+        frame = numpy.expand_dims(frame, axis=0)    # (1, C, H, W)
+
+        img_tensor = torch.from_numpy(frame).to("cuda" if torch.cuda.is_available() else "cpu")
+        print("✅ Converted to tensor:", img_tensor.shape)
 
         with torch.no_grad():
             latent = vae.encode(img_tensor).latent_dist.sample() * 0.18215
+            print("✅ VAE output latent shape:", latent.shape)
 
         return latent
     except Exception as e:
-        raise RuntimeError(f"Failed to prepare frame: {str(e)}")
-
+        raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
 
 # Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
 def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
