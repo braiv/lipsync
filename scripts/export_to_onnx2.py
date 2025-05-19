@@ -80,6 +80,7 @@ with torch.no_grad():
             }
         },
         opset_version=17,
+        export_params=True # This includes the weights!
     )
 print(f"✅ Export complete: {onnx_path}")
 print(f"⏱️ Time taken: {round(time.time() - start, 2)} seconds")
