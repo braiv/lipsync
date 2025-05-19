@@ -302,30 +302,38 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
 def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
     if vision_frame is None:
         raise ValueError("❌ vision_frame is None.")
-    if not isinstance(vision_frame, numpy.ndarray):
+    if not isinstance(vision_frame, np.ndarray):
         raise TypeError("❌ vision_frame is not a numpy array.")
     if vision_frame.size == 0:
         raise ValueError("❌ vision_frame is empty.")
-    
+
     print("🖼️ Raw vision_frame shape:", vision_frame.shape)
 
     try:
-        frame = cv2.resize(vision_frame, (512, 512))  # 👈 this line was crashing
+        # ✅ Convert from BGR (OpenCV default) to RGB
+        frame_rgb = cv2.cvtColor(vision_frame, cv2.COLOR_BGR2RGB)
+
+        # ✅ Resize to 512x512
+        resized = cv2.resize(frame_rgb, (512, 512))
         print("✅ Resized frame to 512x512")
 
-        frame = frame.astype(numpy.float32) / 255.0
-        frame = (frame * 2.0) - 1.0
-        frame = numpy.transpose(frame, (2, 0, 1))   # (C, H, W)
-        frame = numpy.expand_dims(frame, axis=0)    # (1, C, H, W)
+        # ✅ Normalize to [-1, 1]
+        normalized = resized.astype(np.float32) / 255.0
+        normalized = (normalized * 2.0) - 1.0
 
-        img_tensor = torch.from_numpy(frame).to("cuda" if torch.cuda.is_available() else "cpu")
-        print("✅ Converted to tensor:", img_tensor.shape)
+        # ✅ Change shape to (1, 3, 512, 512)
+        tensor = torch.from_numpy(np.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
+        # ✅ Move to device
+        tensor = tensor.to("cuda" if torch.cuda.is_available() else "cpu")
+
+        # ✅ Encode with VAE
         with torch.no_grad():
-            latent = vae.encode(img_tensor).latent_dist.sample() * 0.18215
+            latent = vae.encode(tensor).latent_dist.sample() * 0.18215
             print("✅ VAE output latent shape:", latent.shape)
 
         return latent
+
     except Exception as e:
         raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
 
