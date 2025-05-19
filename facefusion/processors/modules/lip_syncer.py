@@ -31,6 +31,8 @@ from diffusers.models import AutoencoderKL
 # Load VAE (Stable Diffusion 1.5 compatible)
 vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to("cuda").eval()
 
+projection_weight = torch.randn(384, 4).to("cuda" if torch.cuda.is_available() else "cpu")  # or load if saved
+
 @lru_cache(maxsize = None)
 def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
 	return\
@@ -206,10 +208,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
 
                     # Flatten and project to 384-dim (matches ONNX export dummy)
                     encoder_hidden_states = vision_latent.permute(0, 2, 3, 1).reshape(1, -1, 4)  # (1, T*H*W, 4)
+                    encoder_hidden_states = torch.nn.functional.linear(encoder_hidden_states, projection_weight)  # (1, 4096, 384)
                     encoder_hidden_states = encoder_hidden_states.cpu().numpy()
 
                     print("Audio tensor shape:", audio_tensor.shape)   # should be (1, 13, 8, 64, 64)
-                    print("Encoder hidden state shape:", encoder_hidden_states.shape) # (1, 32768, 4)
+                    print("Encoder hidden state shape:", encoder_hidden_states.shape) # (1, 4096, 384)
 
                     # Run inference using ONNX model
                     output_latent = lip_syncer.run(None, {
