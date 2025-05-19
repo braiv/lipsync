@@ -191,28 +191,37 @@ def sync_lip(target_face : Face, temp_audio_frame : AudioFrame, temp_vision_fram
 
 
 def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> VisionFrame:
-    lip_syncer = get_inference_pool().get('lip_syncer')
+    lip_syncer = get_inference_pool().get('lip_syncer')  # ONNX Runtime session
     model_name = state_manager.get_item('lip_syncer_model')
 
     with conditional_thread_semaphore():
         if model_name == 'latentsync':
             try:
                 with torch.no_grad():
+                    # Prepare audio input → (1, 13, 8, 64, 64)
                     audio_tensor = prepare_latentsync_audio(temp_audio_frame)
-                    video_tensor = prepare_latentsync_frame(close_vision_frame)
-                    video_tensor = video_tensor.unsqueeze(2).repeat(1, 1, 8, 1, 1)
+
+                    # Prepare video input → (1, 4, 64, 64)
+                    vision_latent = prepare_latentsync_frame(close_vision_frame)
+
+                    # Flatten and project to 384-dim (matches ONNX export dummy)
+                    encoder_hidden_states = vision_latent.permute(0, 2, 3, 1).reshape(1, -1, 4)  # (1, T*H*W, 4)
+                    encoder_hidden_states = encoder_hidden_states.cpu().numpy()
 
                     print("Audio tensor shape:", audio_tensor.shape)   # should be (1, 13, 8, 64, 64)
-                    print("Video tensor shape:", video_tensor.shape)   # should be (1, 4, 8, 64, 64)
+                    print("Encoder hidden state shape:", encoder_hidden_states.shape) # (1, 32768, 4)
 
+                    # Run inference using ONNX model
                     output_latent = lip_syncer.run(None, {
-                        'sample': audio_tensor,
-						'timesteps': numpy.array([0], dtype=numpy.float32), 
-                        'encoder_hidden_states': video_tensor
-                    })[0]
+                    'sample': audio_tensor.cpu().numpy(),
+                    'timesteps': numpy.array([0], dtype=numpy.float32),
+                    'encoder_hidden_states': encoder_hidden_states
+                })[0]
+
                     # Convert numpy array to torch tensor if needed
                     if isinstance(output_latent, numpy.ndarray):
                         output_latent = torch.from_numpy(output_latent).to("cuda")
+
                     close_vision_frame = normalize_latentsync_frame(output_latent)
             except Exception as e:
                 logger.error(f"LatentSync processing failed: {str(e)}", __name__)
@@ -335,10 +344,10 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
 
         # ✅ Encode with VAE
         with torch.no_grad():
-            latent = vae.encode(tensor).latent_dist.sample() * 0.18215
+            latent = vae.encode(tensor).latent_dist.sample() * 0.18215 # → (1, 4, 64, 64)
             print("✅ VAE output latent shape:", latent.shape)
 
-        return latent
+        return latent # this will be encoder_hidden_states (after reshape)
 
     except Exception as e:
         raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
@@ -350,7 +359,7 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
     
     try:
         with torch.no_grad():
-            decoded = vae.decode(latent / 0.18215).sample
+            decoded = vae.decode(latent / 0.18215).sample # → (1, 3, 512, 512)
 
         decoded = (decoded.clamp(-1, 1) + 1) / 2.0
         decoded = (decoded * 255).to(torch.uint8)
