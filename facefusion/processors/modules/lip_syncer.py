@@ -199,7 +199,12 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
             try:
                 with torch.no_grad():
                     audio_tensor = prepare_latentsync_audio(temp_audio_frame)
-                    video_tensor = prepare_latentsync_frame(close_vision_frame).unsqueeze(2)
+                    video_tensor = prepare_latentsync_frame(close_vision_frame)
+                    video_tensor = video_tensor.unsqueeze(2).repeat(1, 1, 8, 1, 1)
+
+                    print("Audio tensor shape:", audio_tensor.shape)   # should be (1, 13, 8, 64, 64)
+                    print("Video tensor shape:", video_tensor.shape)   # should be (1, 4, 8, 64, 64)
+
                     output_latent = lip_syncer.run(None, {
                         'source': audio_tensor,
                         'target': video_tensor
