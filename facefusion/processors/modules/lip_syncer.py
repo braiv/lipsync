@@ -248,61 +248,54 @@ def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 # Prepare audio for LatentSync: log-mel normalization + reshape to (1, 13, 8, 64, 64)
 def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
     """
-    Converts input mel spectrogram of shape (1, 1, 80, 16) to LatentSync tensor of shape (1, 13, 8, 64, 64)
+    Converts mel spectrogram (1, 1, 80, 16) → (1, 13, 8, 64, 64)
     """
-    if not isinstance(temp_audio_frame, numpy.ndarray):
-        raise TypeError("Input must be a numpy array")
     try:
-        print("Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
+        print("🔹 Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
+        frame = temp_audio_frame.squeeze()  # (80, 16)
+        print("🔹 Step 2 — Squeezed shape:", frame.shape)
 
-        # Step 2: Remove batch and channel dims: (1, 1, 80, 16) → (80, 16)
-        frame = temp_audio_frame.squeeze()
-        print("Step 2 — Squeezed shape:", frame.shape)
-
-        # (Optional) Normalize again if needed — you can skip if already log-scaled
+        # Normalize like Whisper
         frame = numpy.maximum(frame, 1e-10)
         frame = numpy.log10(frame)
         frame = numpy.maximum(frame, frame.max() - 8.0)
         frame = (frame + 4.0) / 4.0
         frame = frame.astype(numpy.float32)
+        print("Step 3 — Normalized. Shape:", frame.shape)
 
-        # Step 4: Pad or trim time dimension to 13
-        if frame.shape[1] < 13:
-            pad_width = 13 - frame.shape[1]
-            print(f"Padding from {frame.shape[1]} to 13 with {pad_width} zeros")
-            frame = numpy.pad(frame, ((0, 0), (0, pad_width)), mode='constant')
-        elif frame.shape[1] > 13:
-            print(f"Trimming from {frame.shape[1]} to 13")
+        # Trim or pad time steps to 13
+        time_dim = frame.shape[1]
+        if time_dim < 13:
+            pad = 13 - time_dim
+            print(f"ℹ️ Padding {pad} zeros")
+            frame = np.pad(frame, ((0, 0), (0, pad)), mode='constant')
+        elif time_dim > 13:
+            print(f"ℹ️ Trimming from {time_dim} to 13 time steps")
             frame = frame[:, :13]
 
-        print("Step 4 — Shape after trim/pad:", frame.shape)  # (80, 13)
+        print("🔹 Step 4 — Trimmed/padded shape:", frame.shape)  # (80, 13)
 
-		# Step 5: Reshape → (13, 8, 8, 8)
-        try:
-            reshaped = frame.T.reshape(13, 8, 8, 8)
-            print("Step 5 — Reshaped to:", reshaped.shape)
-        except Exception as e:
-            raise ValueError(f"❌ Failed reshaping to (13, 8, 8, 8): {e}")
+        blocks = []
+        for t in range(13):
+            slice_80 = frame[:, t]  # (80,)
+            # Project to (8, 8, 8)
+            cube = numpy.tile(slice_80[:8], (8, 8, 1)).transpose(2, 0, 1)
+            blocks.append(cube)
 
-        # Step 6: Upsample → (13, 8, 64, 64)
-        upsampled = numpy.repeat(numpy.repeat(reshaped, 8, axis=2), 8, axis=3)
-        print("Step 6 — Upsampled to:", upsampled.shape)
+        reshaped = numpy.stack(blocks, axis=0)  # (13, 8, 8, 8)
+        print("Step 5 — Created 3D blocks:", reshaped.shape)
 
-        # Step 7: Add batch dim → (1, 13, 8, 64, 64)
-        final = upsampled[numpy.newaxis, ...]
-        print("Final output shape:", final.shape)
+        upsampled = numpy.repeat(numpy.repeat(reshaped, 8, axis=2), 8, axis=3)  # (13, 8, 64, 64)
+        print("Step 6 — Upsampled to (13, 8, 64, 64):", upsampled.shape)
 
-        # Step 8: Convert to torch tensor
+        final = upsampled[numpy.newaxis, ...]  # (1, 13, 8, 64, 64)
+        print("✅ Final tensor shape:", final.shape)
+
         tensor = torch.from_numpy(final)
-        if torch.cuda.is_available():
-            print("Tensor moved to CUDA")
-            return tensor.cuda()
-        else:
-            print("CUDA not available, tensor on CPU")
-            return tensor
+        return tensor.cuda() if torch.cuda.is_available() else tensor
 
     except Exception as e:
-        raise RuntimeError(f"Failed to prepare LatentSync audio: {str(e)}")
+        raise RuntimeError(f"❌ Failed to prepare LatentSync audio: {str(e)}")
 
 
 # Prepare video frame for LatentSync: resize, normalize, encode with VAE → latent shape (1, 4, 64, 64)
