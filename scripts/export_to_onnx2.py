@@ -47,9 +47,8 @@ print("🔧 Creating dummy input...")
 sample_input = torch.randn(1, 13, 8, 64, 64).to(device)  # (B, C, T, H, W)
 timesteps = torch.tensor([10.0], dtype=torch.float32).to(device)  # Match ONNX float32
 
-# Fix encoder_hidden_states: flatten to 3D (B, Seq, D)
-raw_video = torch.randn(1, 4, 8, 64, 64).to(device)  # (B, 4, T, H, W)
-encoder_hidden_states = raw_video.permute(0, 2, 3, 4, 1).reshape(1, -1, 4)  # (B, T*H*W, 4)
+encoder_hidden_states = torch.randn(1, 32768, 320).to(device)
+
 print("✅ Dummy input created. encoder_hidden_states:", encoder_hidden_states.shape)
 
 # ✅ Optional: Test forward pass before export
