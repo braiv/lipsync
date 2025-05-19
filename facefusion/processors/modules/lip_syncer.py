@@ -307,7 +307,7 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
 def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
     if vision_frame is None:
         raise ValueError("❌ vision_frame is None.")
-    if not isinstance(vision_frame, np.ndarray):
+    if not isinstance(vision_frame, numpy.ndarray):
         raise TypeError("❌ vision_frame is not a numpy array.")
     if vision_frame.size == 0:
         raise ValueError("❌ vision_frame is empty.")
