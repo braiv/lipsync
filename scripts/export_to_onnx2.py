@@ -97,6 +97,10 @@ print(f"⏱️ Time taken: {round(time.time() - start, 2)} seconds")
 
 # 🧪 ONNX inference check
 print("🧪 Verifying exported ONNX model with GPU...")
+
+sample_input = torch.randn(1, 13, 2, 32, 32).to(device)
+encoder_hidden_states = torch.randn(1, 2048, 384).to(device)  # much smaller seq_len
+
 try:
     ort_session = ort.InferenceSession(
         onnx_path,
