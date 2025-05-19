@@ -4,6 +4,9 @@ import sys
 import time
 from pathlib import Path
 import os
+import onnxruntime as ort
+import numpy as np
+
 
 # 🛠️ Add LatentSync source path so imports work
 sys.path.append("/home/cody_braiv_co/latent-sync")
@@ -91,6 +94,29 @@ with torch.no_grad():
     )
 print(f"✅ Export complete: {onnx_path}")
 print(f"⏱️ Time taken: {round(time.time() - start, 2)} seconds")
+
+
+print("🧪 Verifying exported ONNX model with GPU...")
+try:
+    ort_session = ort.InferenceSession(
+        onnx_path,
+        providers=['CUDAExecutionProvider']  # 👈 Use GPU
+    )
+
+    outputs = ort_session.run(
+        None,
+        {
+            "sample": sample_input.cpu().numpy(),  # ONNXRuntime expects NumPy arrays on CPU
+            "timesteps": timesteps.cpu().numpy(),
+            "encoder_hidden_states": encoder_hidden_states.cpu().numpy()
+        }
+    )
+
+    print("✅ ONNX model inference successful. Output shape:", outputs[0].shape)
+
+except Exception as e:
+    print("❌ ONNX model verification failed:", e)
+
 
 # 📁 Move relevant files to new folder after export
 DEST_FOLDER = "latentsync_model_files"
