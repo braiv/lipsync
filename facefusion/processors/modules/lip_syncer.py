@@ -251,15 +251,15 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
         raise TypeError("Input must be a numpy array")
             
     try:
-		# Step 1: Print the raw input shape
+        # Step 1: Print the raw input shape
         print("Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
-		# Step 2: Apply log-mel and normalization
+        # Step 2: Apply log-mel and normalization
         frame = numpy.log10(numpy.maximum(temp_audio_frame, 1e-5))
         frame = (frame - frame.mean()) / frame.std()
         frame = frame.astype(numpy.float32)
-		# Step 3: Print shape after normalization
+        # Step 3: Print shape after normalization
         print("Step 2 — Shape after normalization:", frame.shape)
-		# Step 4: Trim or pad to 13 frames in the time dimension
+        # Step 4: Trim or pad to 13 frames in the time dimension
         if frame.shape[0] < 13:
             pad_len = 13 - frame.shape[0]
             print("Padding from {frame.shape[0]} to 13 with {pad_len} empty frames")
