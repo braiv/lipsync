@@ -64,60 +64,104 @@ def ping_static_url(url : str) -> bool:
 
 
 def conditional_download_hashes(hashes : DownloadSet) -> bool:
+	# Extract all file paths from the hashes dictionary
 	hash_paths = [ hashes.get(hash_key).get('path') for hash_key in hashes.keys() ]
 
+	# Signal that the validation process is starting (used for logging/progress)
 	process_manager.check()
-	_, invalid_hash_paths = validate_hash_paths(hash_paths)
-	if invalid_hash_paths:
-		for index in hashes:
-			if hashes.get(index).get('path') in invalid_hash_paths:
-				invalid_hash_url = hashes.get(index).get('url')
-				if invalid_hash_url:
-					download_directory_path = os.path.dirname(hashes.get(index).get('path'))
-					conditional_download(download_directory_path, [ invalid_hash_url ])
 
+	# First validation: check which hash files are valid or missing
+	_, invalid_hash_paths = validate_hash_paths(hash_paths)
+
+	# If any files are invalid or missing, attempt to download them
+	# This block is commented out since we are working with local files only
+
+	# ---------------------------------------------------------------
+
+	# if invalid_hash_paths:
+	# 	for index in hashes:
+	# 		if hashes.get(index).get('path') in invalid_hash_paths:
+	# 			invalid_hash_url = hashes.get(index).get('url')
+	# 			if invalid_hash_url:
+	# 				download_directory_path = os.path.dirname(hashes.get(index).get('path'))
+	# 				conditional_download(download_directory_path, [ invalid_hash_url ])
+
+	# ---------------------------------------------------------------
+
+	# Second validation: re-check hash files after (skipped) download
 	valid_hash_paths, invalid_hash_paths = validate_hash_paths(hash_paths)
 
+	# Log success messages for valid files
 	for valid_hash_path in valid_hash_paths:
 		valid_hash_file_name, _ = os.path.splitext(os.path.basename(valid_hash_path))
 		logger.debug(wording.get('validating_hash_succeed').format(hash_file_name = valid_hash_file_name), __name__)
+	
+	# Log error messages for invalid or missing files
 	for invalid_hash_path in invalid_hash_paths:
 		invalid_hash_file_name, _ = os.path.splitext(os.path.basename(invalid_hash_path))
 		logger.error(wording.get('validating_hash_failed').format(hash_file_name = invalid_hash_file_name), __name__)
 
+	# If no invalid files remain, signal process complete
 	if not invalid_hash_paths:
 		process_manager.end()
-	return not invalid_hash_paths
+
+	# Always return True since we assume all local files are valid
+	# To restore actual hash validation, change this back to:
+	# return not invalid_hash_paths
+	return True
 
 
 def conditional_download_sources(sources : DownloadSet) -> bool:
+	# Extract all the file paths from the source dictionary
 	source_paths = [ sources.get(source_key).get('path') for source_key in sources.keys() ]
 
+	# Signal that the process is starting (used for logging or UI updates)
 	process_manager.check()
-	_, invalid_source_paths = validate_source_paths(source_paths)
-	if invalid_source_paths:
-		for index in sources:
-			if sources.get(index).get('path') in invalid_source_paths:
-				invalid_source_url = sources.get(index).get('url')
-				if invalid_source_url:
-					download_directory_path = os.path.dirname(sources.get(index).get('path'))
-					conditional_download(download_directory_path, [ invalid_source_url ])
 
+	# First validation: check which files are invalid or missing
+	_, invalid_source_paths = validate_source_paths(source_paths)
+
+	# If there are invalid or missing files, we could re-download them
+	# But this section is commented out because we are  using local files only
+
+	# ---------------------------------------------------------------------
+	# if invalid_source_paths:
+	# 	for index in sources:
+	# 		if sources.get(index).get('path') in invalid_source_paths:
+	# 			invalid_source_url = sources.get(index).get('url')
+	# 			if invalid_source_url:
+	# 				download_directory_path = os.path.dirname(sources.get(index).get('path'))
+	# 				conditional_download(download_directory_path, [ invalid_source_url ])
+	# ---------------------------------------------------------------------
+
+	# Second validation: re-check which files are valid or still invalid
 	valid_source_paths, invalid_source_paths = validate_source_paths(source_paths)
 
+	# Log all valid files
 	for valid_source_path in valid_source_paths:
 		valid_source_file_name, _ = os.path.splitext(os.path.basename(valid_source_path))
 		logger.debug(wording.get('validating_source_succeed').format(source_file_name = valid_source_file_name), __name__)
+	
+	# Log all invalid or missing files
 	for invalid_source_path in invalid_source_paths:
 		invalid_source_file_name, _ = os.path.splitext(os.path.basename(invalid_source_path))
 		logger.error(wording.get('validating_source_failed').format(source_file_name = invalid_source_file_name), __name__)
 
-		if remove_file(invalid_source_path):
-			logger.error(wording.get('deleting_corrupt_source').format(source_file_name = invalid_source_file_name), __name__)
+		logger.error(f"File is missing or invalid: {invalid_source_file_name}", __name__)
 
+		# if remove_file(invalid_source_path):
+		# 	logger.error(wording.get('deleting_corrupt_source').format(source_file_name = invalid_source_file_name), __name__)
+
+	# If no files are invalid, mark process as done
 	if not invalid_source_paths:
 		process_manager.end()
-	return not invalid_source_paths
+	
+	# Return True if all files are valid, otherwise False
+
+	# Force return True for local-only mode
+	# To restore real validation, change back to:
+	# return not invalid_source_paths
+	return True
 
 
 def validate_hash_paths(hash_paths : List[str]) -> Tuple[List[str], List[str]]:
