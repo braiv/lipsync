@@ -209,7 +209,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         output_latent = torch.from_numpy(output_latent).to("cuda")
                     close_vision_frame = normalize_latentsync_frame(output_latent)
             except Exception as e:
-                logger.error(f"LatentSync processing failed: {str(e)}")
+                logger.error(f"LatentSync processing failed: {str(e)}", __name__)
                 return close_vision_frame
         else:
             # Wav2Lip-style direct inference with image and mel-spectrogram
