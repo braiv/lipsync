@@ -323,11 +323,11 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         print("✅ Resized frame to 512x512")
 
         # ✅ Normalize to [-1, 1]
-        normalized = resized.astype(np.float32) / 255.0
+        normalized = resized.astype(numpy.float32) / 255.0
         normalized = (normalized * 2.0) - 1.0
 
         # ✅ Change shape to (1, 3, 512, 512)
-        tensor = torch.from_numpy(np.transpose(normalized, (2, 0, 1))).unsqueeze(0)
+        tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
         # ✅ Move to device
         tensor = tensor.to("cuda" if torch.cuda.is_available() else "cpu")
