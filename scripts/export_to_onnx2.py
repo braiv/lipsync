@@ -44,10 +44,10 @@ print("✅ Checkpoint loaded and model ready.")
 
 # 🧪 Prepare dummy inputs
 print("🔧 Creating dummy input...")
-sample_input = torch.randn(1, 13, 8, 64, 64).to(device)  # (B, C, T, H, W)
+sample_input = torch.randn(1, 13, 4, 32, 32).to(device)  # (B, C, T, H, W)
 timesteps = torch.tensor([10.0], dtype=torch.float32).to(device)  # Match ONNX float32
 
-encoder_hidden_states = torch.randn(1, 32768, 384).to(device)
+encoder_hidden_states = torch.randn(1, 16384, 384).to(device)
 
 print("✅ Dummy input created. encoder_hidden_states:", encoder_hidden_states.shape)
 
@@ -75,8 +75,8 @@ with torch.no_grad():
             "sample": {
                 0: "batch_size",
                 2: "num_frames",
-                # 3: "height",       # Optional — only if you test it
-                # 4: "width"         # Optional — only if you test it
+                3: "height",       # Optional — only if you test it
+                4: "width"         # Optional — only if you test it
             },
              "encoder_hidden_states": {
                  0: "batch_size", 
@@ -85,8 +85,8 @@ with torch.no_grad():
             "output": {
                 0: "batch_size",
                 2: "num_frames",
-                # 3: "height",
-                # 4: "width"
+                3: "height",
+                4: "width"
             }
         },
         opset_version=17,
