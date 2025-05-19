@@ -247,36 +247,62 @@ def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 
 # Prepare audio for LatentSync: log-mel normalization + reshape to (1, 13, 8, 64, 64)
 def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
+    """
+    Converts input mel spectrogram of shape (1, 1, 80, 16) to LatentSync tensor of shape (1, 13, 8, 64, 64)
+    """
     if not isinstance(temp_audio_frame, numpy.ndarray):
         raise TypeError("Input must be a numpy array")
-            
     try:
-        # Step 1: Print the raw input shape
         print("Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
-        # Step 2: Apply log-mel and normalization
-        frame = numpy.log10(numpy.maximum(temp_audio_frame, 1e-5))
-        frame = (frame - frame.mean()) / frame.std()
+
+        # Step 2: Remove batch and channel dims: (1, 1, 80, 16) → (80, 16)
+        frame = temp_audio_frame.squeeze()
+        print("Step 2 — Squeezed shape:", frame.shape)
+
+        # (Optional) Normalize again if needed — you can skip if already log-scaled
+        frame = numpy.maximum(frame, 1e-10)
+        frame = numpy.log10(frame)
+        frame = numpy.maximum(frame, frame.max() - 8.0)
+        frame = (frame + 4.0) / 4.0
         frame = frame.astype(numpy.float32)
-        # Step 3: Print shape after normalization
-        print("Step 2 — Shape after normalization:", frame.shape)
-        # Step 4: Trim or pad to 13 frames in the time dimension
-        if frame.shape[0] < 13:
-            pad_len = 13 - frame.shape[0]
-            print("Padding from {frame.shape[0]} to 13 with {pad_len} empty frames")
-            padding = numpy.zeros((pad_len, *frame.shape[1:]), dtype=numpy.float32)
-            frame = numpy.concatenate([frame, padding], axis=0)
-        elif frame.shape[0] > 13:
-            print(f"Trimming from {frame.shape[0]} to 13 frames")
-            frame = frame[:13]
-        # Step 5: Print shape before final reshape
-        print("Step 3 — Shape before final reshape:", frame.shape)
-        # Step 6: Reshape to (1, 13, 8, 64, 64)
-        frame = frame.reshape(1, 13, 8, 64, 64)
-        # Step 7: Convert to tensor
-        tensor = torch.from_numpy(frame)
-        return tensor.cuda() if torch.cuda.is_available() else tensor
+
+        # Step 4: Pad or trim time dimension to 13
+        if frame.shape[1] < 13:
+            pad_width = 13 - frame.shape[1]
+            print(f"Padding from {frame.shape[1]} to 13 with {pad_width} zeros")
+            frame = numpy.pad(frame, ((0, 0), (0, pad_width)), mode='constant')
+        elif frame.shape[1] > 13:
+            print(f"Trimming from {frame.shape[1]} to 13")
+            frame = frame[:, :13]
+
+        print("Step 4 — Shape after trim/pad:", frame.shape)  # (80, 13)
+
+		# Step 5: Reshape → (13, 8, 8, 8)
+        try:
+            reshaped = frame.T.reshape(13, 8, 8, 8)
+            print("Step 5 — Reshaped to:", reshaped.shape)
+        except Exception as e:
+            raise ValueError(f"❌ Failed reshaping to (13, 8, 8, 8): {e}")
+
+        # Step 6: Upsample → (13, 8, 64, 64)
+        upsampled = numpy.repeat(numpy.repeat(reshaped, 8, axis=2), 8, axis=3)
+        print("Step 6 — Upsampled to:", upsampled.shape)
+
+        # Step 7: Add batch dim → (1, 13, 8, 64, 64)
+        final = upsampled[numpy.newaxis, ...]
+        print("Final output shape:", final.shape)
+
+        # Step 8: Convert to torch tensor
+        tensor = torch.from_numpy(final)
+        if torch.cuda.is_available():
+            print("Tensor moved to CUDA")
+            return tensor.cuda()
+        else:
+            print("CUDA not available, tensor on CPU")
+            return tensor
+
     except Exception as e:
-        raise RuntimeError(f"Failed to prepare audio: {str(e)}")
+        raise RuntimeError(f"Failed to prepare LatentSync audio: {str(e)}")
 
 
 # Prepare video frame for LatentSync: resize, normalize, encode with VAE → latent shape (1, 4, 64, 64)
