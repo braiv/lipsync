@@ -43,13 +43,16 @@ print("✅ Checkpoint loaded and model ready.")
 print("🔧 Creating dummy input...")
 sample_input = torch.randn(1, 13, 8, 64, 64).to(device)  # (B, C, T, H, W)
 timesteps = torch.tensor([10]).to(device)
+
+encoder_hidden_states = torch.randn(1, 4, 64, 64).to(device) # → shape: (1, 4, 64, 64)
+encoder_hidden_states = encoder_hidden_states.unsqueeze(2).repeat(1, 1, 8, 1, 1).to(device)  # → (1, 4, 8, 64, 64)
 print("✅ Dummy input created.")
 
 # ✅ Optional: Test forward pass before export
 print("🧪 Testing model forward pass...")
 try:
     with torch.no_grad():
-        _ = model(sample_input, timesteps)
+        _ = model(sample_input, timesteps, encoder_hidden_states)
     print("✅ Forward pass successful.")
 except Exception as e:
     print("❌ Forward pass failed:", e)
@@ -61,9 +64,9 @@ start = time.time()
 with torch.no_grad():
     torch.onnx.export(
         model,
-        (sample_input, timesteps),
+        (sample_input, timesteps, encoder_hidden_states),
         onnx_path,
-        input_names=["sample", "timesteps"],
+        input_names=["sample", "timesteps", "encoder_hidden_states"],
         output_names=["output"],
         dynamic_axes={
             "sample": {
@@ -71,6 +74,10 @@ with torch.no_grad():
                 2: "num_frames",
                 # 3: "height",       # Optional — only if you test it
                 # 4: "width"         # Optional — only if you test it
+            },
+             "encoder_hidden_states": {
+                 0: "batch_size", 
+                 2: "num_frames"
             },
             "output": {
                 0: "batch_size",
