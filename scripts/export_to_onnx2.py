@@ -45,11 +45,12 @@ print("✅ Checkpoint loaded and model ready.")
 # 🧪 Prepare dummy inputs
 print("🔧 Creating dummy input...")
 sample_input = torch.randn(1, 13, 8, 64, 64).to(device)  # (B, C, T, H, W)
-timesteps = torch.tensor([10]).to(device)
+timesteps = torch.tensor([10.0], dtype=torch.float32).to(device)  # Match ONNX float32
 
-encoder_hidden_states = torch.randn(1, 4, 64, 64).to(device) # → shape: (1, 4, 64, 64)
-encoder_hidden_states = encoder_hidden_states.unsqueeze(2).repeat(1, 1, 8, 1, 1).to(device)  # → (1, 4, 8, 64, 64)
-print("✅ Dummy input created.")
+# Fix encoder_hidden_states: flatten to 3D (B, Seq, D)
+raw_video = torch.randn(1, 4, 8, 64, 64).to(device)  # (B, 4, T, H, W)
+encoder_hidden_states = raw_video.permute(0, 2, 3, 4, 1).reshape(1, -1, 4)  # (B, T*H*W, 4)
+print("✅ Dummy input created. encoder_hidden_states:", encoder_hidden_states.shape)
 
 # ✅ Optional: Test forward pass before export
 print("🧪 Testing model forward pass...")
@@ -80,7 +81,7 @@ with torch.no_grad():
             },
              "encoder_hidden_states": {
                  0: "batch_size", 
-                 2: "num_frames"
+                 1: "seq_len"
             },
             "output": {
                 0: "batch_size",
@@ -95,12 +96,12 @@ with torch.no_grad():
 print(f"✅ Export complete: {onnx_path}")
 print(f"⏱️ Time taken: {round(time.time() - start, 2)} seconds")
 
-
+# 🧪 ONNX inference check
 print("🧪 Verifying exported ONNX model with GPU...")
 try:
     ort_session = ort.InferenceSession(
         onnx_path,
-        providers=['CUDAExecutionProvider']  # 👈 Use GPU
+        providers=["CUDAExecutionProvider"] if ort.get_device() == "GPU" else ["CPUExecutionProvider"]
     )
 
     outputs = ort_session.run(
