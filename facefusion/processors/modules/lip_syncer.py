@@ -82,7 +82,7 @@ def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
 				'lip_syncer':
 				{
 					'url': resolve_download_url('models-3.0.0', 'latentsync_unet.hash'),
-					'path': resolve_relative_path('../.assets/models/latentsync_unet.hash')
+					'path': resolve_relative_path('../.assets/models/latentsync_model_files/latentsync_unet.hash')
 				}
 			},
 			'sources':
@@ -90,7 +90,7 @@ def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
 				'lip_syncer':
 				{
 					'url': resolve_download_url('models-3.0.0', 'latentsync_unet.onnx'),
-					'path': resolve_relative_path('../.assets/models/latentsync_unet.onnx')
+					'path': resolve_relative_path('../.assets/models/latentsync_model_files/latentsync_unet.onnx')
 				}
 			},
 			'size': (256, 256)
