@@ -86,7 +86,7 @@ print(f"✅ Export complete: {onnx_path}")
 print(f"⏱️ Time taken: {round(time.time() - start, 2)} seconds")
 
 # 📁 Move relevant files to new folder after export
-DEST_FOLDER = "onnx_weights"
+DEST_FOLDER = "latentsync_model_files"
 print(f"📁 Moving files to ./{DEST_FOLDER}...")
 
 os.makedirs(DEST_FOLDER, exist_ok=True)
