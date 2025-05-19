@@ -249,20 +249,30 @@ def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
     if not isinstance(temp_audio_frame, numpy.ndarray):
         raise TypeError("Input must be a numpy array")
-    
+            
     try:
+		# Step 1: Print the raw input shape
+        print("Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
+		# Step 2: Apply log-mel and normalization
         frame = numpy.log10(numpy.maximum(temp_audio_frame, 1e-5))
         frame = (frame - frame.mean()) / frame.std()
         frame = frame.astype(numpy.float32)
-        
+		# Step 3: Print shape after normalization
+        print("Step 2 — Shape after normalization:", frame.shape)
+		# Step 4: Trim or pad to 13 frames in the time dimension
         if frame.shape[0] < 13:
             pad_len = 13 - frame.shape[0]
+            print("Padding from {frame.shape[0]} to 13 with {pad_len} empty frames")
             padding = numpy.zeros((pad_len, *frame.shape[1:]), dtype=numpy.float32)
             frame = numpy.concatenate([frame, padding], axis=0)
         elif frame.shape[0] > 13:
+            print(f"Trimming from {frame.shape[0]} to 13 frames")
             frame = frame[:13]
-            
+        # Step 5: Print shape before final reshape
+        print("Step 3 — Shape before final reshape:", frame.shape)
+        # Step 6: Reshape to (1, 13, 8, 64, 64)
         frame = frame.reshape(1, 13, 8, 64, 64)
+        # Step 7: Convert to tensor
         tensor = torch.from_numpy(frame)
         return tensor.cuda() if torch.cuda.is_available() else tensor
     except Exception as e:
