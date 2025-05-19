@@ -206,8 +206,9 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     print("Video tensor shape:", video_tensor.shape)   # should be (1, 4, 8, 64, 64)
 
                     output_latent = lip_syncer.run(None, {
-                        'source': audio_tensor,
-                        'target': video_tensor
+                        'sample': audio_tensor,
+						'timesteps': numpy.array([0], dtype=numpy.float32), 
+                        'encoder_hidden_states': video_tensor
                     })[0]
                     # Convert numpy array to torch tensor if needed
                     if isinstance(output_latent, numpy.ndarray):
