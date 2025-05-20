@@ -261,6 +261,7 @@ def prepare_crop_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 
 
 def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
+	print("You are in normalize_close_frame(). Shape before transpose:", crop_vision_frame[0].shape)
 	crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
 	crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
 	crop_vision_frame = crop_vision_frame.astype(numpy.uint8)
