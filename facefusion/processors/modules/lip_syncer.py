@@ -188,7 +188,7 @@ def sync_lip(target_face : Face, temp_audio_frame : AudioFrame, temp_vision_fram
 	close_vision_frame, close_matrix = warp_face_by_bounding_box(crop_vision_frame, bounding_box, model_size)
 	close_vision_frame = prepare_crop_frame(close_vision_frame)
 	close_vision_frame = forward(temp_audio_frame, close_vision_frame)
-	close_vision_frame = normalize_close_frame(close_vision_frame)
+	#close_vision_frame = normalize_close_frame(close_vision_frame)
 	crop_vision_frame = cv2.warpAffine(close_vision_frame, cv2.invertAffineTransform(close_matrix), (512, 512), borderMode = cv2.BORDER_REPLICATE)
 	crop_mask = numpy.minimum.reduce(crop_masks)
 	print("🔍 crop_mask min/max:", crop_mask.min(), crop_mask.max())
@@ -247,6 +247,8 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                 'target': close_vision_frame
             })[0]
 
+            close_vision_frame = normalize_close_frame(close_vision_frame)
+
     return close_vision_frame
 
 
@@ -268,28 +270,9 @@ def prepare_crop_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 
 
 def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
-    print("🔍 normalize_close_frame() - Input shape:", crop_vision_frame.shape)
-
-    if crop_vision_frame.dtype != numpy.uint8 and crop_vision_frame.shape[1] == 3:
-        crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)  # (H, W, C)
-        crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
-        crop_vision_frame = crop_vision_frame.astype(numpy.uint8)
-
-    elif crop_vision_frame.dtype == numpy.uint8 and crop_vision_frame.shape == (1, 3, 512, 512):
-        crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
-
-    elif crop_vision_frame.dtype == numpy.uint8 and crop_vision_frame.shape == (512, 512, 3):
-        print("✅ Already final format.")
-
-    else:
-        raise ValueError(f"❌ Unexpected input shape to normalize_close_frame: {crop_vision_frame.shape}")
-
-    # 🔄 Convert RGB → BGR (for OpenCV consistency)
-    crop_vision_frame = cv2.cvtColor(crop_vision_frame, cv2.COLOR_RGB2BGR)
-
-    print("🧪 Final normalized close frame - min/max per channel:", crop_vision_frame[..., 0].min(), crop_vision_frame[..., 1].min(), crop_vision_frame[..., 2].min())
-    print("🧪 Channel means:", crop_vision_frame[..., 0].mean(), crop_vision_frame[..., 1].mean(), crop_vision_frame[..., 2].mean())
-
+    crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
+    crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
+    crop_vision_frame = crop_vision_frame.astype(numpy.uint8)
     return crop_vision_frame
 
 
@@ -412,34 +395,37 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
     
     try:
         if latent.ndim == 5:
-            # ✅ Reduce temporal dim: latent is (1, 4, 8, 32, 32) → (1, 4, 32, 32)
-            latent = latent[:, :, 4, :, :]  # take the middle frame (T=4 of 0–7)
+            # ✅ Reduce temporal dim: (1, 4, 8, 32, 32) → (1, 4, 32, 32)
+            latent = latent[:, :, 4, :, :]
 
         with torch.no_grad():
-            # Before VAE decoding
             print("🔍 Before VAE decode - latent min/max:", latent.min().item(), latent.max().item())
             print("🔍 Before VAE decode - latent mean:", latent.mean().item())
 
-            # Upsample back to 64x64 for VAE decode
+            # Upsample to 64x64 before decoding
             latent = F.interpolate(latent, size=(64, 64), mode='bilinear', align_corners=False)
-            latent = latent.clamp(-1, 1) 
-            decoded = vae.decode(latent / 0.18215).sample # → (1, 3, 512, 512)
+            latent = latent.clamp(-1, 1)
 
-            # After VAE decoding
+            decoded = vae.decode(latent / 0.18215).sample  # → (1, 3, 512, 512)
+
             print("🔍 After VAE decode - raw min/max:", decoded.min().item(), decoded.max().item())
             print("🔍 After VAE decode - raw mean:", decoded.mean().item())
-			
-            # Convert [-1, 1] → [0, 255]
+
+            # Convert to uint8 image (0–255)
             decoded = (decoded.clamp(-1, 1) + 1) / 2.0
-            decoded = (decoded * 255).to(torch.uint8)
+            decoded = decoded[0].permute(1, 2, 0).cpu().numpy() * 255  # → (512, 512, 3)
+            decoded = decoded.astype(numpy.uint8)
 
-            # After final conversion
-            print("🔍 Final uint8 - min/max:", decoded.min().item(), decoded.max().item())
-            print("🔍 Final shape:", decoded.shape)
+            # 🔁 Convert RGB → BGR for OpenCV
+            decoded = cv2.cvtColor(decoded, cv2.COLOR_RGB2BGR)
 
-        return decoded.cpu().numpy() if torch.cuda.is_available() else decoded.numpy() # Return shape: (1, 3, 512, 512)
+            print("🧪 Final normalized close frame - min/max per channel:", decoded[..., 0].min(), decoded[..., 1].min(), decoded[..., 2].min())
+            print("🧪 Channel means:", decoded[..., 0].mean(), decoded[..., 1].mean(), decoded[..., 2].mean())
+
+        return decoded
+
     except Exception as e:
-        raise RuntimeError(f"Failed to normalize frame: {str(e)}")
+        raise RuntimeError(f"❌ Failed to normalize frame: {str(e)}")
 
 
 def get_reference_frame(source_face : Face, target_face : Face, temp_vision_frame : VisionFrame) -> VisionFrame:
