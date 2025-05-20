@@ -402,6 +402,7 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
 
             # Upsample back to 64x64 for VAE decode
             latent = F.interpolate(latent, size=(64, 64), mode='bilinear', align_corners=False)
+            latent = latent.clamp(-1, 1) 
             decoded = vae.decode(latent / 0.18215).sample # → (1, 3, 512, 512)
 
             # After VAE decoding
