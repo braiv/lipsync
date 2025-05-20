@@ -268,33 +268,32 @@ def prepare_crop_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 
 
 def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
-    # 1. Print shape before transpose
     print("🔍 normalize_close_frame() - Input shape:", crop_vision_frame.shape)
-    
-    if crop_vision_frame.dtype == numpy.uint8:
-        # Already valid for pasting
-        print("✅ normalize_close_frame(): Input is already uint8. Skipping scaling.")
-        return crop_vision_frame[0].transpose(1, 2, 0)
 
-    # Otherwise, assume float32 in [0, 1]
-    print("⚠️ normalize_close_frame(): Input is float, applying scaling.")
-    
-    # 2. Print min/max/mean before scaling
-    print("🔍 Before scaling - min/max/mean:", 
-          crop_vision_frame.min(), 
-          crop_vision_frame.max(), 
-          crop_vision_frame.mean())
-    
-    crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
-    crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
-    
-    # 3. Print min/max/mean after scaling
-    print("🔍 After scaling - min/max/mean:", 
-          crop_vision_frame.min(), 
-          crop_vision_frame.max(), 
-          crop_vision_frame.mean())
-    
-    return crop_vision_frame.astype(numpy.uint8)
+    # If it's CHW float32, process it
+    if crop_vision_frame.dtype != numpy.uint8 and crop_vision_frame.shape[1] == 3:
+        crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)  # → HWC
+        crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
+        crop_vision_frame = crop_vision_frame.astype(numpy.uint8)
+
+    # If it's CHW uint8 (1, 3, H, W), just transpose
+    elif crop_vision_frame.dtype == numpy.uint8 and crop_vision_frame.shape == (1, 3, 512, 512):
+        crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
+
+    # If it's already (512, 512, 3), just return it
+    elif crop_vision_frame.dtype == numpy.uint8 and crop_vision_frame.shape == (512, 512, 3):
+        print("✅ Already final format.")
+        return crop_vision_frame
+
+    else:
+        raise ValueError(f"❌ Unexpected input shape to normalize_close_frame: {crop_vision_frame.shape}")
+
+    print("🧪 Final normalized close frame - min/max per channel:", 
+          crop_vision_frame[..., 0].min(), crop_vision_frame[..., 1].min(), crop_vision_frame[..., 2].min())
+    print("🧪 Channel means:", 
+          crop_vision_frame[..., 0].mean(), crop_vision_frame[..., 1].mean(), crop_vision_frame[..., 2].mean())
+
+    return crop_vision_frame
 
 
 # Prepare audio for LatentSync: log-mel normalization + reshape to (1, 13, 8, 32, 32)
