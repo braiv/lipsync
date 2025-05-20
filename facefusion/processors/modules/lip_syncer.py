@@ -214,8 +214,8 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     encoder_hidden_states = torch.nn.functional.linear(encoder_hidden_states, projection_weight)  # Project to 384-dim (matches ONNX export dummy) (1, 1024, 384)
                     encoder_hidden_states = encoder_hidden_states.cpu().numpy()
 
-                    print("Audio tensor shape:", audio_tensor.shape)   # should be (1, 13, 8, 32, 32)
-                    print("Encoder hidden state shape:", encoder_hidden_states.shape) # (1, 1024, 384)
+                    #print("Audio tensor shape:", audio_tensor.shape)   # should be (1, 13, 8, 32, 32)
+                    #print("Encoder hidden state shape:", encoder_hidden_states.shape) # (1, 1024, 384)
 
                     # Run inference using ONNX model
                     output_latent = lip_syncer.run(None, {
@@ -230,6 +230,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
 					
                     # Convert Input: (1, 4, 8, 32, 32) to Output: (1, 3, 512, 512) for downstream transpose
                     close_vision_frame = normalize_latentsync_frame(output_latent)
+
+                    # After model inference
+                    print("🔍 Model output - min/max:", output_latent.min().item(), output_latent.max().item())
+                    print("🔍 Model output - mean:", output_latent.mean().item())
+                    print("🔍 Model output shape:", output_latent.shape)
             except Exception as e:
                 logger.error(f"LatentSync processing failed: {str(e)}", __name__)
                 return close_vision_frame
@@ -261,7 +266,7 @@ def prepare_crop_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 
 
 def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
-	print("You are in normalize_close_frame(). Shape before transpose:", crop_vision_frame[0].shape)
+	#print("You are in normalize_close_frame(). Shape before transpose:", crop_vision_frame[0].shape)
 	crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
 	crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
 	crop_vision_frame = crop_vision_frame.astype(numpy.uint8)
@@ -275,9 +280,9 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
     Converts mel spectrogram (1, 1, 80, 16) → (1, 13, 8, 32, 32)
     """
     try:
-        print("🔹 Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
+        #print("🔹 Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
         frame = temp_audio_frame.squeeze()  # (80, 16)
-        print("🔹 Step 2 — Squeezed shape:", frame.shape)
+        #print("🔹 Step 2 — Squeezed shape:", frame.shape)
 
         # Normalize like Whisper
 		# Shifts and scales to roughly [0, 2]
@@ -286,19 +291,19 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
         frame = numpy.maximum(frame, frame.max() - 8.0)
         frame = (frame + 4.0) / 4.0
         frame = frame.astype(numpy.float32)
-        print("Step 3 — Normalized. Shape:", frame.shape) # (80, 16)
+        #print("Step 3 — Normalized. Shape:", frame.shape) # (80, 16)
 
         # Trim or pad time steps to 13
         time_dim = frame.shape[1]
         if time_dim < 13:
             pad = 13 - time_dim
-            print(f"ℹ️ Padding {pad} zeros")
+            #print(f"ℹ️ Padding {pad} zeros")
             frame = numpy.pad(frame, ((0, 0), (0, pad)), mode='constant')
         elif time_dim > 13:
-            print(f"ℹ️ Trimming from {time_dim} to 13 time steps")
+            #print(f"ℹ️ Trimming from {time_dim} to 13 time steps")
             frame = frame[:, :13]
 
-        print("🔹 Step 4 — Trimmed/padded shape:", frame.shape)  # (80, 13)
+        #print("🔹 Step 4 — Trimmed/padded shape:", frame.shape)  # (80, 13)
 
         blocks = []
         for t in range(13):
@@ -308,13 +313,13 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
             blocks.append(cube)
 
         reshaped = numpy.stack(blocks, axis=0)  # (13, 8, 8, 8)
-        print("Step 5 — Created 3D blocks:", reshaped.shape)
+        #print("Step 5 — Created 3D blocks:", reshaped.shape)
 
         upsampled = numpy.repeat(numpy.repeat(reshaped, 4, axis=2), 4, axis=3)  # (13, 8, 32, 32)
-        print("Step 6 — Upsampled to (13, 8, 32, 32):", upsampled.shape)
+        #print("Step 6 — Upsampled to (13, 8, 32, 32):", upsampled.shape)
 
         final = upsampled[numpy.newaxis, ...]  # (1, 13, 8, 32, 32)
-        print("✅ Final tensor shape:", final.shape)
+        #print("✅ Final tensor shape:", final.shape)
 
         tensor = torch.from_numpy(final)
         return tensor.cuda() if torch.cuda.is_available() else tensor
@@ -333,11 +338,15 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
     if vision_frame.size == 0:
         raise ValueError("❌ vision_frame is empty.")
 
-    print("🖼️ Raw vision_frame shape:", vision_frame.shape)
+    #print("🖼️ Raw vision_frame shape:", vision_frame.shape)
 
     try:
         # ✅ Convert from BGR (OpenCV default) to RGB
         frame_rgb = cv2.cvtColor(vision_frame, cv2.COLOR_BGR2RGB)
+
+        # After BGR to RGB conversion
+        print("🔍 After BGR2RGB - min/max:", frame_rgb.min(), frame_rgb.max())
+        print("🔍 After BGR2RGB - mean:", frame_rgb.mean())
 
         # ✅ Resize to 512x512
         resized = cv2.resize(frame_rgb, (512, 512))
@@ -346,6 +355,10 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         # ✅ Normalize to [-1, 1]
         normalized = resized.astype(numpy.float32) / 255.0
         normalized = (normalized * 2.0) - 1.0
+
+        # After normalization
+        print("🔍 After normalization - min/max:", normalized.min(), normalized.max())
+        print("🔍 After normalization - mean:", normalized.mean())
 
         # ✅ Change shape to (1, 3, 512, 512)
         tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
@@ -357,7 +370,8 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         with torch.no_grad():
             latent = vae.encode(tensor).latent_dist.sample() * 0.18215 # → (1, 4, 64, 64)
             latent = F.interpolate(latent, size = (32, 32), mode='bilinear', align_corners=False) # downsample it to (1, 4, 32, 32)
-            print("✅ VAE output latent shape:", latent.shape)
+            print("🔍 VAE latent - min/max:", latent.min().item(), latent.max().item())
+            print("🔍 VAE latent - mean:", latent.mean().item())
 
         return latent # this will be encoder_hidden_states (after reshape)
 
@@ -376,14 +390,29 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             latent = latent[:, :, 4, :, :]  # take the middle frame (T=4 of 0–7)
 
         with torch.no_grad():
+            # Before VAE decoding
+            print("🔍 Before VAE decode - latent min/max:", latent.min().item(), latent.max().item())
+            print("🔍 Before VAE decode - latent mean:", latent.mean().item())
+
             # Upsample back to 64x64 for VAE decode
             latent = F.interpolate(latent, size=(64, 64), mode='bilinear', align_corners=False)
             decoded = vae.decode(latent / 0.18215).sample # → (1, 3, 512, 512)
 
-        decoded = (decoded.clamp(-1, 1) + 1) / 2.0
-        decoded = (decoded * 255).to(torch.uint8)
+            # After VAE decoding
+            print("🔍 After VAE decode - raw min/max:", decoded.min().item(), decoded.max().item())
+            print("🔍 After VAE decode - raw mean:", decoded.mean().item())
 
-        print("✅ normalize_latentsync_frame() output shape:", decoded.shape)  # (1, 3, 512, 512)
+            decoded = (decoded.clamp(-1, 1) + 1) / 2.0
+            decoded = (decoded * 255).to(torch.uint8)
+
+            # After normalization
+            print("🔍 After normalization - min/max:", decoded.clamp(-1, 1).min().item(), decoded.clamp(-1, 1).max().item())
+            print("🔍 After normalization - mean:", decoded.clamp(-1, 1).mean().item())
+
+            # After final conversion
+            print("🔍 Final uint8 - min/max:", decoded.min().item(), decoded.max().item())
+            print("🔍 Final uint8 - mean:", decoded.mean().item())
+            print("🔍 Final shape:", decoded.shape)
 
         return decoded.cpu().numpy() if torch.cuda.is_available() else decoded.numpy() # Return shape: (1, 3, 512, 512)
     except Exception as e:
