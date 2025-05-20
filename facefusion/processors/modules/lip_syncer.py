@@ -268,11 +268,33 @@ def prepare_crop_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 
 
 def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
-	#print("You are in normalize_close_frame(). Shape before transpose:", crop_vision_frame[0].shape)
-	crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
-	crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
-	crop_vision_frame = crop_vision_frame.astype(numpy.uint8)
-	return crop_vision_frame
+    # 1. Print shape before transpose
+    print("🔍 normalize_close_frame() - Input shape:", crop_vision_frame.shape)
+    
+    if crop_vision_frame.dtype == numpy.uint8:
+        # Already valid for pasting
+        print("✅ normalize_close_frame(): Input is already uint8. Skipping scaling.")
+        return crop_vision_frame[0].transpose(1, 2, 0)
+
+    # Otherwise, assume float32 in [0, 1]
+    print("⚠️ normalize_close_frame(): Input is float, applying scaling.")
+    
+    # 2. Print min/max/mean before scaling
+    print("🔍 Before scaling - min/max/mean:", 
+          crop_vision_frame.min(), 
+          crop_vision_frame.max(), 
+          crop_vision_frame.mean())
+    
+    crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
+    crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
+    
+    # 3. Print min/max/mean after scaling
+    print("🔍 After scaling - min/max/mean:", 
+          crop_vision_frame.min(), 
+          crop_vision_frame.max(), 
+          crop_vision_frame.mean())
+    
+    return crop_vision_frame.astype(numpy.uint8)
 
 
 # Prepare audio for LatentSync: log-mel normalization + reshape to (1, 13, 8, 32, 32)
@@ -417,7 +439,6 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
 
             # After final conversion
             print("🔍 Final uint8 - min/max:", decoded.min().item(), decoded.max().item())
-            print("🔍 Final uint8 - mean:", decoded.mean().item())
             print("🔍 Final shape:", decoded.shape)
 
         return decoded.cpu().numpy() if torch.cuda.is_available() else decoded.numpy() # Return shape: (1, 3, 512, 512)
