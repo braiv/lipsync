@@ -190,11 +190,8 @@ def sync_lip(target_face : Face, temp_audio_frame : AudioFrame, temp_vision_fram
 	close_vision_frame = forward(temp_audio_frame, close_vision_frame)
 	close_vision_frame = normalize_close_frame(close_vision_frame)
 	crop_vision_frame = cv2.warpAffine(close_vision_frame, cv2.invertAffineTransform(close_matrix), (512, 512), borderMode = cv2.BORDER_REPLICATE)
-	#crop_mask = numpy.minimum.reduce(crop_masks)
-	#print("🔍 crop_mask min/max:", crop_mask.min(), crop_mask.max())
-	
-    # TEMP: Force full mask (no masking effect)
-	crop_mask = numpy.ones_like(crop_vision_frame[..., 0], dtype=numpy.float32)
+	crop_mask = numpy.minimum.reduce(crop_masks)
+	print("🔍 crop_mask min/max:", crop_mask.min(), crop_mask.max())
 
 	paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
 	return paste_vision_frame
