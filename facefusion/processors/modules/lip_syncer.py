@@ -98,7 +98,7 @@ def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
 					'path': resolve_relative_path('../.assets/models/latentsync_model_files/latentsync_unet.onnx')
 				}
 			},
-			'size': (256, 256)
+			'size': (512, 512)
 		}
 	}
 
