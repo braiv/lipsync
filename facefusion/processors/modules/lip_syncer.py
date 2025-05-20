@@ -341,6 +341,11 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
     #print("🖼️ Raw vision_frame shape:", vision_frame.shape)
 
     try:
+		# 🛡️ Ensure valid OpenCV input: uint8 in [0, 255]
+        if vision_frame.dtype != numpy.uint8:
+            print(f"⚠️ Warning: vision_frame dtype is {vision_frame.dtype}, converting to uint8.")
+            vision_frame = numpy.clip(vision_frame, 0, 255).astype(numpy.uint8)
+
         # ✅ Convert from BGR (OpenCV default) to RGB
         frame_rgb = cv2.cvtColor(vision_frame, cv2.COLOR_BGR2RGB)
 
@@ -378,6 +383,7 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
     except Exception as e:
         raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
 
+
 # Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
 # Input: (1, 4, 8, 32, 32) → Output: (1, 3, 512, 512) for downstream transpose
 def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
@@ -401,13 +407,10 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             # After VAE decoding
             print("🔍 After VAE decode - raw min/max:", decoded.min().item(), decoded.max().item())
             print("🔍 After VAE decode - raw mean:", decoded.mean().item())
-
+			
+            # Convert [-1, 1] → [0, 255]
             decoded = (decoded.clamp(-1, 1) + 1) / 2.0
             decoded = (decoded * 255).to(torch.uint8)
-
-            # After normalization
-            print("🔍 After normalization - min/max:", decoded.clamp(-1, 1).min().item(), decoded.clamp(-1, 1).max().item())
-            print("🔍 After normalization - mean:", decoded.clamp(-1, 1).mean().item())
 
             # After final conversion
             print("🔍 Final uint8 - min/max:", decoded.min().item(), decoded.max().item())
