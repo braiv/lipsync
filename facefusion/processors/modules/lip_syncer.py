@@ -270,28 +270,25 @@ def prepare_crop_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
 def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
     print("🔍 normalize_close_frame() - Input shape:", crop_vision_frame.shape)
 
-    # If it's CHW float32, process it
     if crop_vision_frame.dtype != numpy.uint8 and crop_vision_frame.shape[1] == 3:
-        crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)  # → HWC
+        crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)  # (H, W, C)
         crop_vision_frame = crop_vision_frame.clip(0, 1) * 255
         crop_vision_frame = crop_vision_frame.astype(numpy.uint8)
 
-    # If it's CHW uint8 (1, 3, H, W), just transpose
     elif crop_vision_frame.dtype == numpy.uint8 and crop_vision_frame.shape == (1, 3, 512, 512):
         crop_vision_frame = crop_vision_frame[0].transpose(1, 2, 0)
 
-    # If it's already (512, 512, 3), just return it
     elif crop_vision_frame.dtype == numpy.uint8 and crop_vision_frame.shape == (512, 512, 3):
         print("✅ Already final format.")
-        return crop_vision_frame
 
     else:
         raise ValueError(f"❌ Unexpected input shape to normalize_close_frame: {crop_vision_frame.shape}")
 
-    print("🧪 Final normalized close frame - min/max per channel:", 
-          crop_vision_frame[..., 0].min(), crop_vision_frame[..., 1].min(), crop_vision_frame[..., 2].min())
-    print("🧪 Channel means:", 
-          crop_vision_frame[..., 0].mean(), crop_vision_frame[..., 1].mean(), crop_vision_frame[..., 2].mean())
+    # 🔄 Convert RGB → BGR (for OpenCV consistency)
+    crop_vision_frame = cv2.cvtColor(crop_vision_frame, cv2.COLOR_RGB2BGR)
+
+    print("🧪 Final normalized close frame - min/max per channel:", crop_vision_frame[..., 0].min(), crop_vision_frame[..., 1].min(), crop_vision_frame[..., 2].min())
+    print("🧪 Channel means:", crop_vision_frame[..., 0].mean(), crop_vision_frame[..., 1].mean(), crop_vision_frame[..., 2].mean())
 
     return crop_vision_frame
 
