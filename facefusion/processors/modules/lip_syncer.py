@@ -228,7 +228,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     if isinstance(output_latent, numpy.ndarray):
                         output_latent = torch.from_numpy(output_latent).to("cuda")
 					
-                    # Convert Input: (1, 4, 8, 32, 32) to Output: (512, 512, 3) RGB numpy image
+                    # Convert Input: (1, 4, 8, 32, 32) to Output: (1, 3, 512, 512) for downstream transpose
                     close_vision_frame = normalize_latentsync_frame(output_latent)
             except Exception as e:
                 logger.error(f"LatentSync processing failed: {str(e)}", __name__)
@@ -365,7 +365,7 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
 
 # Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
-# Input: (1, 4, 8, 32, 32) → Output: (512, 512, 3) RGB numpy image
+# Input: (1, 4, 8, 32, 32) → Output: (1, 3, 512, 512) for downstream transpose
 def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
     if not isinstance(latent, torch.Tensor):
         raise TypeError("Input must be a torch tensor")
@@ -382,9 +382,10 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
 
         decoded = (decoded.clamp(-1, 1) + 1) / 2.0
         decoded = (decoded * 255).to(torch.uint8)
-        decoded = decoded[0].permute(1, 2, 0)  # → (512, 512, 3)
-        
-        return decoded.cpu().numpy() if torch.cuda.is_available() else decoded.numpy()
+
+        print("✅ normalize_latentsync_frame() output shape:", decoded.shape)  # (1, 3, 512, 512)
+
+        return decoded.cpu().numpy() if torch.cuda.is_available() else decoded.numpy() # Return shape: (1, 3, 512, 512)
     except Exception as e:
         raise RuntimeError(f"Failed to normalize frame: {str(e)}")
 
