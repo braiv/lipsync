@@ -47,9 +47,12 @@ print("🔧 Creating dummy input...")
 sample_input = torch.randn(1, 13, 8, 64, 64).to(device)  # (B, C, T, H, W)
 timesteps = torch.tensor([10.0], dtype=torch.float32).to(device)  # Match ONNX float32
 
-encoder_hidden_states = torch.randn(1, 4096, 384).to(device)
+encoder_hidden_states = torch.randn(1, 4096, 384).to(device) # Full encoder input
 
 print("✅ Dummy input created. encoder_hidden_states:", encoder_hidden_states.shape)
+
+# Clear any old GPU memory
+torch.cuda.empty_cache()
 
 # ✅ Optional: Test forward pass before export
 print("🧪 Testing model forward pass...")
@@ -57,6 +60,8 @@ try:
     with torch.no_grad():
         _ = model(sample_input, timesteps, encoder_hidden_states)
     print("✅ Forward pass successful.")
+    print(f"🧠 Peak GPU memory allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
+
 except Exception as e:
     print("❌ Forward pass failed:", e)
     exit(1)
@@ -95,15 +100,23 @@ with torch.no_grad():
 print(f"✅ Export complete: {onnx_path}")
 print(f"⏱️ Time taken: {round(time.time() - start, 2)} seconds")
 
+# Clean up and free GPU again before ONNX inference
+torch.cuda.empty_cache()
+
 # 🧪 ONNX inference check
 print("🧪 Verifying exported ONNX model with GPU...")
 
-sample_input = torch.randn(1, 13, 8, 64, 64).to(device)
-encoder_hidden_states = torch.randn(1, 4096, 384).to(device)  # much smaller seq_len
+# Reuse original sample_input and encoder_hidden_states (already on GPU)
 
 try:
+    # Safe ONNX session options
+    so = ort.SessionOptions()
+    so.enable_mem_pattern = False # reduces large buffer segmentation
+    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL # memory-efficient execution
+
     ort_session = ort.InferenceSession(
         onnx_path,
+        sess_options = so,
         providers=["CUDAExecutionProvider"] if ort.get_device() == "GPU" else ["CPUExecutionProvider"]
     )
 
