@@ -212,25 +212,28 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     vision_latent = prepare_latentsync_frame(close_vision_frame)
 
 					# Reorders the dimension from (1, 4, 64, 64) to (1, 64, 64, 4). Then, flattens (64 x 64 = 4096) it to (1, 4096, 4)
-                    encoder_hidden_states = vision_latent.permute(0, 2, 3, 1).reshape(1, -1, 4)  # (1, T*H*W, 4)
+                    encoder_hidden_states = vision_latent.permute(0, 2, 3, 1).reshape(1, -1, 4)  # (1, 4096, 4)
                     encoder_hidden_states = torch.nn.functional.linear(encoder_hidden_states, projection_weight)  # Project to 384-dim (1, 4096, 384)
-                    encoder_hidden_states = encoder_hidden_states.cpu().numpy()
+                    encoder_hidden_states = encoder_hidden_states.cpu().numpy().astype(numpy.float16)
 
-                    #print("Audio tensor shape:", audio_tensor.shape)   # should be (1, 13, 8, 32, 32)
-                    #print("Encoder hidden state shape:", encoder_hidden_states.shape) # (1, 1024, 384)
-
+                    #print("Audio tensor shape:", audio_tensor.shape)   # should be (1, 13, 8, 64, 64)
+                    #print("Encoder hidden state shape:", encoder_hidden_states.shape) # (1, 4096, 384)
+                    
                     # Run inference using ONNX model
                     output_latent = lip_syncer.run(None, {
-                    'sample': audio_tensor.cpu().numpy(),
+                    'sample': audio_tensor.cpu().numpy().astype(numpy.float16),
                     'timesteps': numpy.array([0], dtype=numpy.float16),
-                    'encoder_hidden_states': encoder_hidden_states.astype(numpy.float16)
-                })[0]
+                    'encoder_hidden_states': encoder_hidden_states
+                    })[0]
+					
+                    if output_latent is None: 
+                        raise RuntimeError("ONNX inference returned None.")
 
                     # Convert numpy array to torch tensor if needed
                     if isinstance(output_latent, numpy.ndarray):
                         output_latent = torch.from_numpy(output_latent).to(torch.float16).to("cuda" if torch.cuda.is_available() else "cpu")
 					
-                    # Convert Input: (1, 4, 8, 64, 64) to Output: (1, 3, 512, 512) for downstream transpose
+                    # Convert Input: (1, 4, 8, 64, 64) to Output: (512, 512, 3) for downstream transpose
                     close_vision_frame = normalize_latentsync_frame(output_latent)
 
                     # After model inference
@@ -240,6 +243,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
             except Exception as e:
                 logger.error(f"LatentSync processing failed: {str(e)}", __name__)
                 return close_vision_frame
+            finally:
+                for var in ['audio_tensor', 'vision_latent', 'encoder_hidden_states', 'output_latent']:
+                    if var in locals():
+                        del locals()[var]
+                torch.cuda.empty_cache()
         else:
             # Wav2Lip-style direct inference with image and mel-spectrogram
             close_vision_frame = lip_syncer.run(None, {
@@ -387,7 +395,7 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
 
 
 # Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
-# Input: (1, 4, 8, 64, 64) → Output: (1, 3, 512, 512) for downstream transpose
+# # Input: (1, 4, 8, 64, 64) → Output: (512, 512, 3) for downstream transpose
 def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
     if not isinstance(latent, torch.Tensor):
         raise TypeError("Input must be a torch tensor")
