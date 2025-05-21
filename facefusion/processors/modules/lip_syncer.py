@@ -225,6 +225,8 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     'timesteps': numpy.array([0], dtype=numpy.float16),
                     'encoder_hidden_states': encoder_hidden_states
                     })[0]
+
+                    torch.cuda.empty_cache()
 					
                     if output_latent is None: 
                         raise RuntimeError("ONNX inference returned None.")
@@ -379,7 +381,8 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
         # ✅ Move to device
-        tensor = tensor.to(torch.float16).to("cuda" if torch.cuda.is_available() else "cpu")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        tensor = tensor.to(device).to(torch.float16)
 
         # ✅ Encode with VAE
         with torch.no_grad():
@@ -418,6 +421,10 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             # Decode from vae (already float16 compatible)
             decoded = vae.decode(latent / 0.18215).sample  # → (1, 3, 512, 512)
 
+            del latent
+
+            torch.cuda.empty_cache()
+
             print("🔍 After VAE decode - raw min/max:", decoded.min().item(), decoded.max().item())
             print("🔍 After VAE decode - raw mean:", decoded.mean().item())
 
@@ -425,6 +432,10 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             decoded = (decoded.clamp(-1, 1) + 1) / 2.0
             decoded = decoded[0].permute(1, 2, 0).cpu().numpy() * 255  # → (512, 512, 3)
             decoded = decoded.astype(numpy.uint8)
+            
+            # Skipping warpAffine if image is empty
+            if decoded.shape[0] == 0 or decoded.shape[1] == 0:
+                raise RuntimeError("❌ Decoded image is empty. Skipping warpAffine.")
 
             # 🔁 Convert RGB → BGR for OpenCV
             decoded = cv2.cvtColor(decoded, cv2.COLOR_RGB2BGR)
