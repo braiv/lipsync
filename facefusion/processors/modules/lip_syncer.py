@@ -31,10 +31,10 @@ from diffusers.models import AutoencoderKL
 
 
 # Load VAE (Stable Diffusion 1.5 compatible)
-vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to("cuda").eval()
+vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to("cuda").half().eval()
 
 # Linear projection layer: projects from 4 → 384
-projection_weight = torch.randn(384, 4).to("cuda" if torch.cuda.is_available() else "cpu")  # or load if saved
+projection_weight = torch.randn(384, 4).half().to("cuda" if torch.cuda.is_available() else "cpu")  # or load if saved
 
 @lru_cache(maxsize = None)
 def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
@@ -205,15 +205,15 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
         if model_name == 'latentsync':
             try:
                 with torch.no_grad():
-                    # Prepare audio input → (1, 13, 8, 32, 32)
+                    # Prepare audio input → (1, 13, 8, 64, 64)
                     audio_tensor = prepare_latentsync_audio(temp_audio_frame)
 
-                    # Prepare video latent → (1, 4, 32, 32)
+                    # Prepare video latent → (1, 4, 64, 64)
                     vision_latent = prepare_latentsync_frame(close_vision_frame)
 
-					# Reorders the dimension from (1, 4, 32, 32) to (1, 32, 32, 4). Then, flattens (32 x 32 = 1024) it to (1, 1024, 4)
+					# Reorders the dimension from (1, 4, 64, 64) to (1, 64, 64, 4). Then, flattens (64 x 64 = 4096) it to (1, 4096, 4)
                     encoder_hidden_states = vision_latent.permute(0, 2, 3, 1).reshape(1, -1, 4)  # (1, T*H*W, 4)
-                    encoder_hidden_states = torch.nn.functional.linear(encoder_hidden_states, projection_weight)  # Project to 384-dim (matches ONNX export dummy) (1, 1024, 384)
+                    encoder_hidden_states = torch.nn.functional.linear(encoder_hidden_states, projection_weight)  # Project to 384-dim (1, 4096, 384)
                     encoder_hidden_states = encoder_hidden_states.cpu().numpy()
 
                     #print("Audio tensor shape:", audio_tensor.shape)   # should be (1, 13, 8, 32, 32)
@@ -222,15 +222,15 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     # Run inference using ONNX model
                     output_latent = lip_syncer.run(None, {
                     'sample': audio_tensor.cpu().numpy(),
-                    'timesteps': numpy.array([0], dtype=numpy.float32),
-                    'encoder_hidden_states': encoder_hidden_states
+                    'timesteps': numpy.array([0], dtype=numpy.float16),
+                    'encoder_hidden_states': encoder_hidden_states.astype(numpy.float16)
                 })[0]
 
                     # Convert numpy array to torch tensor if needed
                     if isinstance(output_latent, numpy.ndarray):
-                        output_latent = torch.from_numpy(output_latent).to("cuda")
+                        output_latent = torch.from_numpy(output_latent).to(torch.float16).to("cuda" if torch.cuda.is_available() else "cpu")
 					
-                    # Convert Input: (1, 4, 8, 32, 32) to Output: (1, 3, 512, 512) for downstream transpose
+                    # Convert Input: (1, 4, 8, 64, 64) to Output: (1, 3, 512, 512) for downstream transpose
                     close_vision_frame = normalize_latentsync_frame(output_latent)
 
                     # After model inference
@@ -276,11 +276,11 @@ def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
     return crop_vision_frame
 
 
-# Prepare audio for LatentSync: log-mel normalization + reshape to (1, 13, 8, 32, 32)
-# Input: (1, 1, 80, 16) mel spectrogram → Output: (1, 13, 8, 32, 32)
+# Prepare audio for LatentSync: log-mel normalization + reshape to (1, 13, 8, 64, 64)
+# Input: (1, 1, 80, 16) mel spectrogram → Output: (1, 13, 8, 64, 64)
 def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
     """
-    Converts mel spectrogram (1, 1, 80, 16) → (1, 13, 8, 32, 32)
+    Converts mel spectrogram (1, 1, 80, 16) → (1, 13, 8, 64, 64), float16
     """
     try:
         #print("🔹 Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
@@ -288,12 +288,12 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
         #print("🔹 Step 2 — Squeezed shape:", frame.shape)
 
         # Normalize like Whisper
-		# Shifts and scales to roughly [0, 2]
+        # Shifts and scales to roughly [0, 2]
         frame = numpy.maximum(frame, 1e-10)
         frame = numpy.log10(frame)
         frame = numpy.maximum(frame, frame.max() - 8.0)
         frame = (frame + 4.0) / 4.0
-        frame = frame.astype(numpy.float32)
+        frame = frame.astype(numpy.float32) # Normalise first in float32 for stability
         #print("Step 3 — Normalized. Shape:", frame.shape) # (80, 16)
 
         # Trim or pad time steps to 13
@@ -311,28 +311,26 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
         blocks = []
         for t in range(13):
             slice_80 = frame[:, t]  # (80,)
-            # Project to (8, 8, 8)
-            cube = numpy.tile(slice_80[:8], (8, 8, 1)).transpose(2, 0, 1)
+            
+			# Create a 3D cube (8, 64, 64) from the first 8 values
+            cube = numpy.tile(slice_80[:8], (64, 64, 1)).transpose(2, 0, 1) # (8, 64, 64)
             blocks.append(cube)
 
-        reshaped = numpy.stack(blocks, axis=0)  # (13, 8, 8, 8)
+        reshaped = numpy.stack(blocks, axis=0)  # (13, 8, 64, 64)
         #print("Step 5 — Created 3D blocks:", reshaped.shape)
 
-        upsampled = numpy.repeat(numpy.repeat(reshaped, 4, axis=2), 4, axis=3)  # (13, 8, 32, 32)
-        #print("Step 6 — Upsampled to (13, 8, 32, 32):", upsampled.shape)
-
-        final = upsampled[numpy.newaxis, ...]  # (1, 13, 8, 32, 32)
+        final = reshaped[numpy.newaxis, ...]  # (1, 13, 8, 64, 64)
         #print("✅ Final tensor shape:", final.shape)
 
-        tensor = torch.from_numpy(final)
+        tensor = torch.from_numpy(final).to(torch.float16)
         return tensor.cuda() if torch.cuda.is_available() else tensor
 
     except Exception as e:
         raise RuntimeError(f"❌ Failed to prepare LatentSync audio: {str(e)}")
 
 
-# Input: (H, W, 3) BGR image (OpenCV), Output: torch.Tensor (1, 4, 32, 32)
-# Prepare video frame for LatentSync: resize, normalize, encode with VAE → latent shape (1, 4, 32, 32)
+# Input: (H, W, 3) BGR image (OpenCV), Output: torch.Tensor (1, 4, 64, 64)
+# Prepare video frame for LatentSync: resize, normalize, encode with VAE → latent shape (1, 4, 64, 64)
 def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
     if vision_frame is None:
         raise ValueError("❌ vision_frame is None.")
@@ -360,9 +358,10 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         resized = cv2.resize(frame_rgb, (512, 512))
         print("✅ Resized frame to 512x512")
 
-        # ✅ Normalize to [-1, 1]
+        # ✅ Normalize to [-1, 1] in float32 then convert to float16
         normalized = resized.astype(numpy.float32) / 255.0
         normalized = (normalized * 2.0) - 1.0
+        normalized = normalized.astype(numpy.float16)
 
         # After normalization
         print("🔍 After normalization - min/max:", normalized.min(), normalized.max())
@@ -372,12 +371,12 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
         # ✅ Move to device
-        tensor = tensor.to("cuda" if torch.cuda.is_available() else "cpu")
+        tensor = tensor.to(torch.float16).to("cuda" if torch.cuda.is_available() else "cpu")
 
         # ✅ Encode with VAE
         with torch.no_grad():
-            latent = vae.encode(tensor).latent_dist.sample() * 0.18215 # → (1, 4, 64, 64)
-            latent = F.interpolate(latent, size = (32, 32), mode='bilinear', align_corners=False) # downsample it to (1, 4, 32, 32)
+            latent = vae.encode(tensor).latent_dist.sample().to(torch.float16) * 0.18215 # → (1, 4, 64, 64)
+            latent = F.interpolate(latent, size = (64, 64), mode='bilinear', align_corners=False) # Ensure final output is (1, 4, 64, 64)
             print("🔍 VAE latent - min/max:", latent.min().item(), latent.max().item())
             print("🔍 VAE latent - mean:", latent.mean().item())
 
@@ -388,24 +387,27 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
 
 
 # Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
-# Input: (1, 4, 8, 32, 32) → Output: (1, 3, 512, 512) for downstream transpose
+# Input: (1, 4, 8, 64, 64) → Output: (1, 3, 512, 512) for downstream transpose
 def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
     if not isinstance(latent, torch.Tensor):
         raise TypeError("Input must be a torch tensor")
     
     try:
         if latent.ndim == 5:
-            # ✅ Reduce temporal dim: (1, 4, 8, 32, 32) → (1, 4, 32, 32)
+            # ✅ Reduce temporal dim: (1, 4, 8, 64, 64) → (1, 4, 64, 64)
             latent = latent[:, :, 4, :, :]
 
         with torch.no_grad():
             print("🔍 Before VAE decode - latent min/max:", latent.min().item(), latent.max().item())
             print("🔍 Before VAE decode - latent mean:", latent.mean().item())
 
-            # Upsample to 64x64 before decoding
+            latent = latent.to(torch.float16).to("cuda" if torch.cuda.is_available() else "cpu")
+
+            # Interpolate to 64x64 if needed just to be safe (Optional)
             latent = F.interpolate(latent, size=(64, 64), mode='bilinear', align_corners=False)
             latent = latent.clamp(-1, 1)
-
+            
+            # Decode from vae (already float16 compatible)
             decoded = vae.decode(latent / 0.18215).sample  # → (1, 3, 512, 512)
 
             print("🔍 After VAE decode - raw min/max:", decoded.min().item(), decoded.max().item())
