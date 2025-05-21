@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 import os
 import onnxruntime as ort
-import numpy as np
+import numpy 
 
 
 # 🛠️ Add LatentSync source path so imports work
@@ -30,8 +30,8 @@ print("✅ Config loaded.")
 
 # 🧠 Initialize the model from config
 print("🧠 Initializing model...")
-model = UNet3DConditionModel(**config.model).to(device)
-print("✅ Model initialized.")
+model = UNet3DConditionModel(**config.model).to(device).half()
+print("✅ Model initialized in float16.")
 
 # 📦 Load checkpoint and process state_dict
 print("📦 Loading checkpoint...")
@@ -44,10 +44,10 @@ print("✅ Checkpoint loaded and model ready.")
 
 # 🧪 Prepare dummy inputs
 print("🔧 Creating dummy input...")
-sample_input = torch.randn(1, 13, 8, 64, 64).to(device)  # (B, C, T, H, W)
-timesteps = torch.tensor([10.0], dtype=torch.float32).to(device)  # Match ONNX float32
+sample_input = torch.randn(1, 13, 8, 64, 64).to(device).half()  # (B, C, T, H, W)
+timesteps = torch.tensor([10.0], dtype=torch.float16).to(device)  
 
-encoder_hidden_states = torch.randn(1, 4096, 384).to(device) # Full encoder input
+encoder_hidden_states = torch.randn(1, 4096, 384).to(device).half() # Full encoder input
 
 print("✅ Dummy input created. encoder_hidden_states:", encoder_hidden_states.shape)
 
@@ -123,9 +123,9 @@ try:
     outputs = ort_session.run(
         None,
         {
-            "sample": sample_input.cpu().numpy(),  # ONNXRuntime expects NumPy arrays on CPU
-            "timesteps": timesteps.cpu().numpy(),
-            "encoder_hidden_states": encoder_hidden_states.cpu().numpy()
+            "sample": sample_input.cpu().numpy().astype(numpy.float16),  # ONNXRuntime expects NumPy arrays on CPU
+            "timesteps": timesteps.cpu().numpy().astype(numpy.float16),
+            "encoder_hidden_states": encoder_hidden_states.cpu().numpy().astype(numpy.float16)
         }
     )
 
