@@ -166,35 +166,42 @@ def post_process() -> None:
 		voice_extractor.clear_inference_pool()
 
 
-def sync_lip(target_face : Face, temp_audio_frame : AudioFrame, temp_vision_frame : VisionFrame) -> VisionFrame:
-	model_size = get_model_options().get('size')
-	temp_audio_frame = prepare_audio_frame(temp_audio_frame)
-	crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), 'ffhq_512', (512, 512))
-	face_landmark_68 = cv2.transform(target_face.landmark_set.get('68').reshape(1, -1, 2), affine_matrix).reshape(-1, 2)
-	bounding_box = create_bounding_box(face_landmark_68)
-	bounding_box[1] -= numpy.abs(bounding_box[3] - bounding_box[1]) * 0.125
-	mouth_mask = create_mouth_mask(face_landmark_68)
-	box_mask = create_static_box_mask(crop_vision_frame.shape[:2][::-1], state_manager.get_item('face_mask_blur'), state_manager.get_item('face_mask_padding'))
-	crop_masks =\
-	[
-		mouth_mask,
-		box_mask
-	]
+def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame: VisionFrame) -> VisionFrame:
+    model_size = get_model_options().get('size')
+    temp_audio_frame = prepare_audio_frame(temp_audio_frame)
+    crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), 'ffhq_512', (512, 512))
+    face_landmark_68 = cv2.transform(target_face.landmark_set.get('68').reshape(1, -1, 2), affine_matrix).reshape(-1, 2)
+    bounding_box = create_bounding_box(face_landmark_68)
+    bounding_box[1] -= numpy.abs(bounding_box[3] - bounding_box[1]) * 0.125
+    mouth_mask = create_mouth_mask(face_landmark_68)
+    box_mask = create_static_box_mask(crop_vision_frame.shape[:2][::-1], state_manager.get_item('face_mask_blur'), state_manager.get_item('face_mask_padding'))
+    crop_masks = [
+        mouth_mask,
+        box_mask
+    ]
 
-	if 'occlusion' in state_manager.get_item('face_mask_types'):
-		occlusion_mask = create_occlusion_mask(crop_vision_frame)
-		crop_masks.append(occlusion_mask)
+    if 'occlusion' in state_manager.get_item('face_mask_types'):
+        occlusion_mask = create_occlusion_mask(crop_vision_frame)
+        crop_masks.append(occlusion_mask)
 
-	close_vision_frame, close_matrix = warp_face_by_bounding_box(crop_vision_frame, bounding_box, model_size)
-	close_vision_frame = prepare_crop_frame(close_vision_frame)
-	close_vision_frame = forward(temp_audio_frame, close_vision_frame)
-	#close_vision_frame = normalize_close_frame(close_vision_frame)
-	crop_vision_frame = cv2.warpAffine(close_vision_frame, cv2.invertAffineTransform(close_matrix), (512, 512), borderMode = cv2.BORDER_REPLICATE)
-	crop_mask = numpy.minimum.reduce(crop_masks)
-	print("🔍 crop_mask min/max:", crop_mask.min(), crop_mask.max())
+    # --- Lip Sync Forward ---
+    close_vision_frame, close_matrix = warp_face_by_bounding_box(crop_vision_frame, bounding_box, model_size)
+    close_vision_frame = prepare_crop_frame(close_vision_frame)
+    close_vision_frame = forward(temp_audio_frame, close_vision_frame)
+    # close_vision_frame = normalize_close_frame(close_vision_frame)
 
-	paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
-	return paste_vision_frame
+    # --- Check if the model returned a valid frame ---
+    if close_vision_frame is None or close_vision_frame.shape[0] == 0 or close_vision_frame.shape[1] == 0:
+        print("⚠️ Skipping lip-sync for this frame due to empty frame: using original frame instead.")
+        return temp_vision_frame  # skip applying mask and return original
+
+    # --- Apply mask and paste lips back ---
+    crop_vision_frame = cv2.warpAffine(close_vision_frame, cv2.invertAffineTransform(close_matrix), (512, 512), borderMode=cv2.BORDER_REPLICATE)
+    crop_mask = numpy.minimum.reduce(crop_masks)
+    print("🔍 crop_mask min/max:", crop_mask.min(), crop_mask.max())
+
+    paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
+    return paste_vision_frame
 
 
 def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> VisionFrame:
