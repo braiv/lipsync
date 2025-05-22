@@ -188,12 +188,30 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
     close_vision_frame, close_matrix = warp_face_by_bounding_box(crop_vision_frame, bounding_box, model_size)
     close_vision_frame = prepare_crop_frame(close_vision_frame)
     close_vision_frame = forward(temp_audio_frame, close_vision_frame)
-    # close_vision_frame = normalize_close_frame(close_vision_frame)
+    # close_vision_frame = normalize_close_frame(close_vision_frame)    
 
     # --- Check if the model returned a valid frame ---
-    if close_vision_frame is None or close_vision_frame.shape[0] == 0 or close_vision_frame.shape[1] == 0:
-        print("⚠️ Skipping lip-sync for this frame due to empty frame: using original frame instead.")
-        return temp_vision_frame  # skip applying mask and return original
+    if close_vision_frame is None:
+        print("⚠️ Model returned None frame, using original frame")
+        return temp_vision_frame
+
+    if not isinstance(close_vision_frame, numpy.ndarray):
+        print("⚠️ Invalid frame type:", type(close_vision_frame))
+        return temp_vision_frame
+
+    if len(close_vision_frame.shape) < 2:
+        print("⚠️ Invalid frame dimensions:", close_vision_frame.shape)
+        return temp_vision_frame
+
+    if close_vision_frame.size == 0 or close_vision_frame.shape[0] == 0 or close_vision_frame.shape[1] == 0:
+        print("⚠️ Empty frame detected:", close_vision_frame.shape)
+        return temp_vision_frame
+
+    # Add expected shape check
+    expected_shape = (512, 512, 3)  # BGR image
+    if close_vision_frame.shape != expected_shape:
+        print(f"⚠️ Unexpected frame shape: got {close_vision_frame.shape}, expected {expected_shape}")
+        return temp_vision_frame
 
     # --- Apply mask and paste lips back ---
     crop_vision_frame = cv2.warpAffine(close_vision_frame, cv2.invertAffineTransform(close_matrix), (512, 512), borderMode=cv2.BORDER_REPLICATE)
