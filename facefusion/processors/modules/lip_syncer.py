@@ -98,7 +98,7 @@ def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
 					'path': resolve_relative_path('../.assets/models/latentsync_model_files/latentsync_unet.onnx')
 				}
 			},
-			'size': (512, 512)
+			'size': (256, 256)
 		}
 	}
 
@@ -208,7 +208,7 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         return temp_vision_frame
 
     # Add expected shape check
-    expected_shape = (512, 512, 3)  # BGR image
+    expected_shape = (256, 256, 3)  # BGR image
     if close_vision_frame.shape != expected_shape:
         print(f"⚠️ Unexpected frame shape: got {close_vision_frame.shape}, expected {expected_shape}")
         return temp_vision_frame
@@ -362,7 +362,7 @@ def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
 
 
 # Input: (H, W, 3) BGR image (OpenCV), Output: torch.Tensor (1, 4, 32, 32)
-# Prepare video frame for LatentSync: resize, normalize, encode with VAE → latent shape (1, 4, 32, 32)
+# Prepare video frame for LatentSync: Resize to 512x512, encode with VAE → (1, 4, 64, 64), then interpolate to → (1, 4, 32, 32)
 def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
     if vision_frame is None:
         raise ValueError("❌ vision_frame is None.")
@@ -419,8 +419,8 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
 
 
-# Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
-# # Input: (1, 4, 8, 32, 32) → Output: (512, 512, 3) for downstream transpose
+# Convert LatentSync UNet output latent back to displayable image (256x256x3 RGB)
+# # Input: (1, 4, 8, 32, 32) → Output: (256, 256, 3) for downstream transpose
 def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
     if not isinstance(latent, torch.Tensor):
         raise TypeError("Input must be a torch tensor")
@@ -442,7 +442,7 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             latent = latent.clamp(-1, 1)
             
             # Decode from vae (already float16 compatible)
-            decoded = vae.decode(latent / 0.18215).sample  # → (1, 3, 512, 512)
+            decoded = vae.decode(latent / 0.18215).sample  # → (1, 3, 256, 256)
 
             del latent
 
@@ -453,7 +453,7 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
 
             # Convert to uint8 image (0–255)
             decoded = (decoded.clamp(-1, 1) + 1) / 2.0
-            decoded = decoded[0].permute(1, 2, 0).cpu().numpy() * 255  # → (512, 512, 3)
+            decoded = decoded[0].permute(1, 2, 0).cpu().numpy() * 255  # → (256, 256, 3)
             decoded = decoded.astype(numpy.uint8)
             
             # Skipping warpAffine if image is empty
