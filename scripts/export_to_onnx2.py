@@ -44,10 +44,10 @@ print("✅ Checkpoint loaded and model ready.")
 
 # 🧪 Prepare dummy inputs
 print("🔧 Creating dummy input...")
-sample_input = torch.randn(1, 13, 8, 64, 64).to(device).half()  # (B, C, T, H, W)
+sample_input = torch.randn(1, 13, 8, 32, 32).to(device).half()  # (B, C, T, H, W)
 timesteps = torch.tensor([10.0], dtype=torch.float16).to(device)  
 
-encoder_hidden_states = torch.randn(1, 4096, 384).to(device).half() # Full encoder input
+encoder_hidden_states = torch.randn(1, 1024, 384).to(device).half() # Full encoder input
 
 print("✅ Dummy input created. encoder_hidden_states:", encoder_hidden_states.shape)
 
