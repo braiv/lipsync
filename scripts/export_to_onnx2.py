@@ -98,7 +98,7 @@ if not SKIP_FORWARD_TEST:
     try:
         with torch.no_grad():
             output = model(sample_input, timesteps, encoder_hidden_states)
-            print(f"✅ Forward pass successful. Output shape: {output.shape}")
+            print(f"✅ Forward pass successful.")
             
             # Clean up output immediately
             del output
