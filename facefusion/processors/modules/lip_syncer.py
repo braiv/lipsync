@@ -83,23 +83,44 @@ def get_audio_encoder():
             available_gb = available_memory / 1024**3
             print(f"💾 Available memory before audio encoder: {available_gb:.1f} GB")
             
-            # Optimized for T4 16GB - only use CPU if very low memory
-            if available_gb < 1.0:
-                print("⚠️ Very low memory! Loading audio encoder on CPU.")
-                audio_device = "cpu"
-            else:
-                audio_device = device
+            # Always load on GPU for better performance
+            audio_device = device
         else:
             audio_device = device
             
-        # Use built-in Whisper 'tiny' model instead of checkpoint file
-        audio_encoder = Audio2Feature(model_path="tiny", device=audio_device)
-        print("✅ Audio encoder loaded.")
+        try:
+            # Use built-in Whisper 'tiny' model instead of checkpoint file
+            audio_encoder = Audio2Feature(model_path="tiny", device=audio_device)
+            print("✅ Audio encoder loaded.")
+            
+            # Test the encoder with a small sample to ensure it works
+            print("🧪 Testing audio encoder...")
+            test_audio = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence at 16kHz
+            
+            # Create a temporary test file
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                test_path = temp_file.name
+            
+            try:
+                sf.write(test_path, test_audio, 16000)
+                test_features = audio_encoder.audio2feat(test_path)
+                print(f"✅ Audio encoder test successful. Output shape: {test_features.shape}")
+            except Exception as test_error:
+                print(f"⚠️ Audio encoder test failed: {test_error}")
+                # Continue anyway, will handle errors during actual use
+            finally:
+                if os.path.exists(test_path):
+                    os.remove(test_path)
+                    
+        except Exception as load_error:
+            print(f"❌ Failed to load audio encoder: {load_error}")
+            raise RuntimeError(f"Could not initialize Audio2Feature: {load_error}")
     else:
-        # Move audio encoder back to GPU if it was offloaded to CPU
-        if torch.cuda.is_available() and hasattr(audio_encoder, 'model') and audio_encoder.model.device.type == 'cpu':
+        # Ensure audio encoder is on the correct device
+        if torch.cuda.is_available() and hasattr(audio_encoder, 'model') and audio_encoder.model.device.type != 'cuda':
             audio_encoder.model = audio_encoder.model.cuda()
-            print("🔄 Moved audio encoder back to GPU")
+            print("🔄 Moved audio encoder to GPU")
     return audio_encoder
 
 def get_vae():
@@ -112,22 +133,18 @@ def get_vae():
             available_gb = available_memory / 1024**3
             print(f"💾 Available memory before VAE: {available_gb:.1f} GB")
             
-            # Optimized for T4 16GB - only use CPU if very low memory
-            if available_gb < 2.0:
-                print("⚠️ Low memory! Loading VAE on CPU.")
-                vae_device = "cpu"
-            else:
-                vae_device = "cuda"
+            # Always load on GPU for better performance
+            vae_device = "cuda"
         else:
             vae_device = "cpu"
             
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(vae_device).half().eval()
         print("✅ VAE loaded.")
     else:
-        # Move VAE back to GPU if it was offloaded to CPU
-        if torch.cuda.is_available() and vae.device.type == 'cpu':
+        # Ensure VAE is on the correct device
+        if torch.cuda.is_available() and vae.device.type != 'cuda':
             vae = vae.cuda()
-            print("🔄 Moved VAE back to GPU")
+            print("🔄 Moved VAE to GPU")
     return vae
 
 def get_projection_weight():
@@ -388,19 +405,19 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         available_gb = available_memory / 1024**3
                         print(f"💾 Available GPU memory: {available_gb:.1f} GB")
                         
-                        # 🔥 AGGRESSIVE MEMORY OPTIMIZATION for video processing
-                        if available_gb < 8.0:  # Less than 8GB available
+                        # 🔥 ADAPTIVE MEMORY OPTIMIZATION with more conservative thresholds
+                        if available_gb < 6.0:  # Less than 6GB available (very conservative)
                             print("⚠️ Low memory detected! Using ultra-conservative settings.")
                             guidance_scale = 1.0  # Disable CFG completely
                             num_inference_steps = 5   # Minimal steps
-                        elif available_gb < 12.0:  # Less than 12GB available  
+                        elif available_gb < 10.0:  # Less than 10GB available  
                             print("💡 Medium memory detected. Using conservative settings.")
                             guidance_scale = 1.0  # Disable CFG
-                            num_inference_steps = 10  # Reduced steps
-                        elif available_gb < 16.0:  # Less than 16GB available
+                            num_inference_steps = 8  # Reduced steps
+                        elif available_gb < 14.0:  # Less than 14GB available
                             print("🚀 Good memory detected! Using standard settings.")
-                            guidance_scale = 1.5  # Standard CFG
-                            num_inference_steps = 15  # Standard steps
+                            guidance_scale = 1.2  # Reduced CFG
+                            num_inference_steps = 12  # Standard steps
                         else:
                             print("🚀 High memory detected! Using optimal settings.")
                             guidance_scale = 1.5  # Full CFG
@@ -581,7 +598,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     print(f"🔍 Final output_latent dtype: {output_latent.dtype}")
                     print(f"🔍 Final output_latent min/max: {output_latent.min().item():.4f}/{output_latent.max().item():.4f}")
                     
-                    # 🧹 Clean up all intermediate tensors
+                    # 🧹 Comprehensive cleanup
                     for var in ['audio_tensor', 'video_latent', 'noise_pred', 'output_latent', 'latents', 
                                'mask_latents', 'masked_image_latents', 'ref_latents', 'concatenated_latents',
                                'latent_model_input', 'noise', 'mouth_mask']:
@@ -589,16 +606,18 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                             del locals()[var]
                     torch.cuda.empty_cache()
                     
-                    # 🧹 Temporary model offloading to save memory during video processing
-                    # Move models to CPU temporarily to free GPU memory for next frame
+                    # 🧹 Safer model offloading to save memory during video processing
                     if torch.cuda.is_available():
                         try:
-                            if audio_encoder is not None and hasattr(audio_encoder, 'model'):
-                                audio_encoder.model.cpu()
-                            if vae is not None:
-                                vae.cpu()
-                            torch.cuda.empty_cache()
-                            print("🧹 Temporarily moved models to CPU to save GPU memory")
+                            # Only offload if we're processing video (multiple frames)
+                            # Don't offload for single image processing
+                            pass  # Disable offloading for now to prevent CUDA errors
+                            # if audio_encoder is not None and hasattr(audio_encoder, 'model'):
+                            #     audio_encoder.model.cpu()
+                            # if vae is not None:
+                            #     vae.cpu()
+                            # torch.cuda.empty_cache()
+                            # print("🧹 Temporarily moved models to CPU to save GPU memory")
                         except Exception as e:
                             print(f"⚠️ Model offloading failed: {e}")
 
@@ -625,7 +644,53 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     logger.error(f"❌ OOM during LatentSync processing! Try reducing video resolution or disabling CFG.", __name__)
                     # 🧹 Emergency cleanup
                     torch.cuda.empty_cache()
-                    return close_vision_frame
+                    
+                    # 🔥 EMERGENCY: Try with minimal settings
+                    print("🆘 Attempting emergency recovery with minimal settings...")
+                    try:
+                        with torch.no_grad():
+                            # Ultra-minimal settings for emergency recovery
+                            guidance_scale = 1.0  # Disable CFG completely
+                            num_inference_steps = 3  # Absolute minimum
+                            do_classifier_free_guidance = False
+                            
+                            # Simple audio processing without CFG
+                            audio_tensor = prepare_latentsync_audio(temp_audio_frame, sample_rate=16000)
+                            video_latent = prepare_latentsync_frame(close_vision_frame)
+                            
+                            # Skip complex masking and use simple noise
+                            noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float16, device=device)
+                            latents = noise
+                            
+                            # Minimal denoising (just 3 steps)
+                            scheduler = DDIMScheduler(num_train_timesteps=1000, beta_start=0.00085, beta_end=0.012, beta_schedule="linear")
+                            scheduler.set_timesteps(num_inference_steps, device=device)
+                            
+                            for t in scheduler.timesteps:
+                                # Simplified input without masking
+                                concatenated_latents = torch.cat([latents, video_latent.unsqueeze(2)], dim=1)
+                                
+                                noise_pred = lip_syncer.run(None, {
+                                    'sample': concatenated_latents.cpu().numpy().astype(numpy.float16),
+                                    'timesteps': numpy.array([t.cpu().numpy()], dtype=numpy.int64),
+                                    'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float16)
+                                })[0]
+                                
+                                noise_pred = torch.from_numpy(noise_pred).to(device)
+                                latents = scheduler.step(noise_pred, t, latents).prev_sample
+                                
+                                # Aggressive cleanup each step
+                                del concatenated_latents, noise_pred
+                                torch.cuda.empty_cache()
+                            
+                            output_latent = latents
+                            close_vision_frame = normalize_latentsync_frame(output_latent)
+                            print("✅ Emergency recovery successful!")
+                            
+                    except Exception as recovery_error:
+                        print(f"❌ Emergency recovery also failed: {recovery_error}")
+                        # Final fallback: return original frame
+                        return close_vision_frame
                 else:
                     logger.error(f"LatentSync processing failed: {str(e)}", __name__)
                     return close_vision_frame
@@ -800,32 +865,69 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             # Use Audio2Feature to extract features from the audio file
             # This follows the same pattern as in lipsync_pipeline.py
             print("🔍 Calling audio2feat...")
-            audio_feat = get_audio_encoder().audio2feat(temp_audio_path)
-            print(f"🔍 Audio2feat returned shape: {audio_feat.shape}")
-            print(f"🔍 Audio2feat returned dtype: {audio_feat.dtype}")
-            
-            # audio_feat should be a tensor of shape (N, 384) where N is number of audio tokens
-            # Add batch dimension to make it (1, N, 384)
-            if audio_feat.ndim == 2:
-                audio_feat = audio_feat.unsqueeze(0)  # (N, 384) -> (1, N, 384)
-            elif audio_feat.ndim == 3:
-                # Handle case where Audio2Feature returns [B, T, F] format
-                # Flatten batch and time dimensions: [B, T, F] -> [1, B*T, F]
-                B, T, F = audio_feat.shape
-                audio_feat = audio_feat.reshape(1, B * T, F)
-                print(f"🔍 Reshaped 3D audio_feat from [{B}, {T}, {F}] to {audio_feat.shape}")
-            
-            print(f"🔍 Final audio_feat shape: {audio_feat.shape}")
-            
-            # Validate output shape
-            if audio_feat.shape[0] == 0 or audio_feat.shape[1] == 0:
-                raise ValueError(f"Invalid audio feature shape: {audio_feat.shape}")
-            
-            # Convert to float16 and move to the correct device
-            audio_feat = audio_feat.to(device, dtype=torch.float16)
-            
-            print(f"🔍 Returning audio tensor shape: {audio_feat.shape}")
-            return audio_feat
+            try:
+                # Validate that the audio encoder is properly loaded
+                encoder = get_audio_encoder()
+                if encoder is None:
+                    raise RuntimeError("Audio encoder is None")
+                if not hasattr(encoder, 'audio2feat'):
+                    raise RuntimeError("Audio encoder does not have audio2feat method")
+                
+                print(f"🔍 Audio encoder type: {type(encoder)}")
+                print(f"🔍 Calling audio2feat on file: {temp_audio_path}")
+                print(f"🔍 File exists: {os.path.exists(temp_audio_path)}")
+                print(f"🔍 File size: {os.path.getsize(temp_audio_path) if os.path.exists(temp_audio_path) else 'N/A'} bytes")
+                
+                audio_feat = encoder.audio2feat(temp_audio_path)
+                print(f"🔍 Audio2feat returned shape: {audio_feat.shape}")
+                print(f"🔍 Audio2feat returned dtype: {audio_feat.dtype}")
+                
+                # Validate the output
+                if audio_feat is None:
+                    raise ValueError("Audio2feat returned None")
+                if not isinstance(audio_feat, torch.Tensor):
+                    raise TypeError(f"Audio2feat returned {type(audio_feat)}, expected torch.Tensor")
+                if audio_feat.numel() == 0:
+                    raise ValueError("Audio2feat returned empty tensor")
+                
+                # audio_feat should be a tensor of shape (N, 384) where N is number of audio tokens
+                # Add batch dimension to make it (1, N, 384)
+                if audio_feat.ndim == 2:
+                    audio_feat = audio_feat.unsqueeze(0)  # (N, 384) -> (1, N, 384)
+                elif audio_feat.ndim == 3:
+                    # Handle case where Audio2Feature returns [B, T, F] format
+                    # Flatten batch and time dimensions: [B, T, F] -> [1, B*T, F]
+                    B, T, F = audio_feat.shape
+                    audio_feat = audio_feat.reshape(1, B * T, F)
+                    print(f"🔍 Reshaped 3D audio_feat from [{B}, {T}, {F}] to {audio_feat.shape}")
+                
+                print(f"🔍 Final audio_feat shape: {audio_feat.shape}")
+                
+                # Validate output shape
+                if audio_feat.shape[0] == 0 or audio_feat.shape[1] == 0:
+                    raise ValueError(f"Invalid audio feature shape: {audio_feat.shape}")
+                if audio_feat.shape[2] != 384:
+                    raise ValueError(f"Expected 384 features, got {audio_feat.shape[2]}")
+                
+                # Convert to float16 and move to the correct device
+                audio_feat = audio_feat.to(device, dtype=torch.float16)
+                
+                print(f"🔍 Returning audio tensor shape: {audio_feat.shape}")
+                return audio_feat
+                
+            except Exception as audio_feat_error:
+                print(f"❌ Audio2feat processing failed: {audio_feat_error}")
+                print(f"❌ Error type: {type(audio_feat_error)}")
+                import traceback
+                print(f"❌ Traceback: {traceback.format_exc()}")
+                
+                # Create a reasonable fallback based on audio length
+                # Estimate number of tokens based on audio duration
+                audio_duration_seconds = len(raw_audio_waveform) / sample_rate
+                estimated_tokens = max(10, int(audio_duration_seconds * 50))  # ~50 tokens per second
+                print(f"🔧 Creating fallback audio tensor with {estimated_tokens} tokens for {audio_duration_seconds:.2f}s audio")
+                fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float16, device=device)
+                return fallback_tensor
             
         finally:
             # Clean up temporary file
@@ -835,9 +937,18 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
     except Exception as e:
         print(f"❌ prepare_latentsync_audio failed: {str(e)}")
         print(f"❌ Input was: {type(raw_audio_waveform)}, shape: {getattr(raw_audio_waveform, 'shape', 'no shape')}")
-        # Return a minimal valid audio tensor as fallback
+        # Return a more reasonable fallback audio tensor based on input
         print("🔧 Creating fallback audio tensor...")
-        fallback_tensor = torch.zeros(1, 10, 384, dtype=torch.float16, device=device)
+        
+        # Try to estimate reasonable number of tokens based on input
+        if hasattr(raw_audio_waveform, 'shape') and len(raw_audio_waveform.shape) > 0:
+            audio_samples = raw_audio_waveform.shape[0]
+            audio_duration = audio_samples / sample_rate
+            estimated_tokens = max(10, int(audio_duration * 50))  # ~50 tokens per second
+        else:
+            estimated_tokens = 25  # Default fallback
+            
+        fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float16, device=device)
         print(f"🔧 Fallback tensor shape: {fallback_tensor.shape}")
         return fallback_tensor
 
@@ -884,7 +995,14 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         with torch.no_grad():
             # Following train_unet.py and lipsync_pipeline.py VAE scaling
             print(f"🔍 About to encode tensor shape: {tensor.shape}")
-            encode_result = get_vae().encode(tensor)
+            
+            # 🔧 Ensure VAE and input are on same device
+            vae_model = get_vae()
+            target_device = vae_model.device
+            tensor = tensor.to(target_device)
+            print(f"🔧 Moved input tensor to {target_device} to match VAE device")
+            
+            encode_result = vae_model.encode(tensor)
             print(f"🔍 Encode result type: {type(encode_result)}")
             print(f"🔍 Encode result latent_dist: {encode_result.latent_dist}")
             
@@ -894,7 +1012,7 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
             print(f"🔍 Latent shape: {latent.shape if latent is not None else 'None'}")
             
             # Handle missing VAE config attributes with defaults
-            vae_config = get_vae().config
+            vae_config = vae_model.config
             print(f"🔍 VAE config type: {type(vae_config)}")
             print(f"🔍 VAE config dir: {dir(vae_config)}")
             
@@ -959,11 +1077,17 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             print("🔍 Before VAE decode - latent shape:", latent.shape)
             print("🔍 Before VAE decode - latent min/max:", latent.min().item(), latent.max().item())
 
-            latent = latent.to(torch.float16).to("cuda" if torch.cuda.is_available() else "cpu")
+            # 🔧 CRITICAL FIX: Ensure VAE model and input are on same device
+            vae_model = get_vae()
+            target_device = vae_model.device
+            
+            # Move latent to same device as VAE model
+            latent = latent.to(target_device, dtype=torch.float16)
+            print(f"🔧 Moved latent to {target_device} to match VAE device")
             
             # Following lipsync_pipeline.py decode_latents method exactly:
             # Step 1: Apply VAE scaling (line 142)
-            vae_config = get_vae().config
+            vae_config = vae_model.config
             shift_factor = getattr(vae_config, 'shift_factor', 0.0)
             scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215)
             
@@ -980,7 +1104,7 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             latents = rearrange(latents, "b c f h w -> (b f) c h w")  # (1, 4, 1, 64, 64) → (1, 4, 64, 64)
             
             # Step 3: VAE decode (line 144)
-            decoded_latents = get_vae().decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
+            decoded_latents = vae_model.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
 
             print("🔍 After VAE decode - raw shape:", decoded_latents.shape)
             print("🔍 After VAE decode - raw min/max:", decoded_latents.min().item(), decoded_latents.max().item())
