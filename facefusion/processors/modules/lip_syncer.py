@@ -779,12 +779,26 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         # ✅ Encode with VAE to get latent representation
         with torch.no_grad():
             # Following train_unet.py and lipsync_pipeline.py VAE scaling
-            latent = get_vae().encode(tensor).latent_dist.sample()
+            print(f"🔍 About to encode tensor shape: {tensor.shape}")
+            encode_result = get_vae().encode(tensor)
+            print(f"🔍 Encode result type: {type(encode_result)}")
+            print(f"🔍 Encode result latent_dist: {encode_result.latent_dist}")
+            
+            latent = encode_result.latent_dist.sample()
+            print(f"🔍 Latent after sampling: {latent}")
+            print(f"🔍 Latent type: {type(latent)}")
+            print(f"🔍 Latent shape: {latent.shape if latent is not None else 'None'}")
             
             # Handle missing VAE config attributes with defaults
             vae_config = get_vae().config
+            print(f"🔍 VAE config type: {type(vae_config)}")
+            print(f"🔍 VAE config dir: {dir(vae_config)}")
+            
             shift_factor = getattr(vae_config, 'shift_factor', 0.0)
             scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215)
+            
+            print(f"🔍 shift_factor: {shift_factor}")
+            print(f"🔍 scaling_factor: {scaling_factor}")
             
             # Correct scaling: (latents - shift_factor) * scaling_factor
             latent = (latent - shift_factor) * scaling_factor
