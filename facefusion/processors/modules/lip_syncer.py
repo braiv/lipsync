@@ -396,121 +396,92 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
             print("🚀 Executing LatentSync path...")
             try:
                 with torch.no_grad():
-                    # 🧹 Aggressive memory cleanup at start
+                    # 🧹 AGGRESSIVE MEMORY CLEANUP at start
                     torch.cuda.empty_cache()
                     
-                    # 💾 Check available memory and adjust settings
+                    # 💾 Check available memory and use ULTRA-CONSERVATIVE settings
                     if torch.cuda.is_available():
                         available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
                         available_gb = available_memory / 1024**3
                         print(f"💾 Available GPU memory: {available_gb:.1f} GB")
                         
-                        # 🔥 ADAPTIVE MEMORY OPTIMIZATION with more conservative thresholds
-                        if available_gb < 6.0:  # Less than 6GB available (very conservative)
-                            print("⚠️ Low memory detected! Using ultra-conservative settings.")
+                        # 🔥 ULTRA-CONSERVATIVE SETTINGS for memory constrained system
+                        if available_gb < 15.0:  # Less than 15GB available (very conservative)
+                            print("⚠️ Memory constrained! Using ultra-minimal settings.")
                             guidance_scale = 1.0  # Disable CFG completely
-                            num_inference_steps = 5   # Minimal steps
-                        elif available_gb < 10.0:  # Less than 10GB available  
-                            print("💡 Medium memory detected. Using conservative settings.")
-                            guidance_scale = 1.0  # Disable CFG
-                            num_inference_steps = 8  # Reduced steps
-                        elif available_gb < 14.0:  # Less than 14GB available
+                            num_inference_steps = 3   # Absolute minimum steps
+                        else:
                             print("🚀 Good memory detected! Using standard settings.")
                             guidance_scale = 1.2  # Reduced CFG
-                            num_inference_steps = 12  # Standard steps
-                        else:
-                            print("🚀 High memory detected! Using optimal settings.")
-                            guidance_scale = 1.5  # Full CFG
-                            num_inference_steps = 20  # Full quality
+                            num_inference_steps = 8  # Reduced steps
                     else:
-                        guidance_scale = 1.5
-                        num_inference_steps = 20
+                        guidance_scale = 1.0
+                        num_inference_steps = 3
                     
                     do_classifier_free_guidance = guidance_scale > 1.0
                     
-                    # Prepare audio input -> (1, N, 384) where N depends on audio length
-                    # LatentSync uses 16kHz audio for Whisper, not 48kHz
+                    # 🏗️ STEP 1: Prepare audio with immediate cleanup
                     print(f"🔍 Input temp_audio_frame shape: {temp_audio_frame.shape if hasattr(temp_audio_frame, 'shape') else 'No shape attr'}")
                     print(f"🔍 Input temp_audio_frame type: {type(temp_audio_frame)}")
                     audio_tensor = prepare_latentsync_audio(temp_audio_frame, sample_rate=16000)
                     print(f"🔍 Audio tensor shape: {audio_tensor.shape}")
-                    print(f"🔍 Audio tensor dtype: {audio_tensor.dtype}")
                     
-                    # 🧹 Cleanup after audio processing
+                    # 🧹 IMMEDIATELY offload audio encoder to CPU to save memory
+                    global audio_encoder
+                    if audio_encoder is not None and hasattr(audio_encoder, 'model'):
+                        audio_encoder.model = audio_encoder.model.cpu()
+                        print("🔄 Moved audio encoder to CPU")
                     torch.cuda.empty_cache()
                     
-                    # Apply classifier-free guidance for audio
+                    # Apply classifier-free guidance for audio only if needed
                     if do_classifier_free_guidance:
-                        # Create unconditional audio embeddings (zeros)
                         null_audio_embeds = torch.zeros_like(audio_tensor)
-                        # Concatenate with conditional embeddings
                         audio_tensor = torch.cat([null_audio_embeds, audio_tensor])
                         print(f"🔍 CFG Audio tensor shape: {audio_tensor.shape}")
-                        del null_audio_embeds  # Immediate cleanup
+                        del null_audio_embeds
+                        torch.cuda.empty_cache()
                                          
-                    # Prepare video input -> (1, 4, 64, 64)
+                    # 🏗️ STEP 2: Prepare video with immediate VAE cleanup
                     video_latent = prepare_latentsync_frame(close_vision_frame)
                     
-                    # 🧹 Cleanup after video processing
+                    # 🧹 IMMEDIATELY offload VAE to CPU after encoding
+                    global vae
+                    if vae is not None:
+                        vae = vae.cpu()
+                        print("🔄 Moved VAE to CPU after encoding")
                     torch.cuda.empty_cache()
                     
-                    # 1. Create initial noise latents for diffusion
-                    # Shape: (1, 4, 1, 64, 64) for single frame
+                    # 🏗️ STEP 3: Setup minimal diffusion (ultra-conservative)
                     noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float16, device=device)
                     
-                    # 2. Create proper mask for mouth region (binary mask)
+                    # Simple mouth mask (no complex masking to save memory)
                     mask_height, mask_width = 64, 64
                     mouth_mask = torch.zeros((mask_height, mask_width), dtype=torch.float16, device=device)
-                    # Create mouth region (lower center part of face)
-                    mouth_y_start = int(mask_height * 0.6)  # Lower 40% of face
-                    mouth_y_end = int(mask_height * 0.9)
-                    mouth_x_start = int(mask_width * 0.3)   # Center 40% width
-                    mouth_x_end = int(mask_width * 0.7)
+                    mouth_y_start, mouth_y_end = int(mask_height * 0.6), int(mask_height * 0.9)
+                    mouth_x_start, mouth_x_end = int(mask_width * 0.3), int(mask_width * 0.7)
                     mouth_mask[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end] = 1.0
-                    
-                    # Shape: (1, 1, 1, 64, 64) - single channel mask
                     mask_latents = mouth_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-                    print(f"🔍 Initial mask_latents shape: {mask_latents.shape}")
                     
-                    # Duplicate masks for classifier-free guidance if needed
                     if do_classifier_free_guidance:
                         mask_latents = torch.cat([mask_latents] * 2)
-                        print(f"🔍 CFG mask_latents shape: {mask_latents.shape}")
                     
-                    # 3. Create masked image latents
-                    # Apply mask to video latents (mask out mouth region)
-                    # First, ensure video_latent has temporal dimension: (1, 4, 64, 64) -> (1, 4, 1, 64, 64)
+                    # Create masked image latents
                     video_latent_5d = video_latent.unsqueeze(2)
-                    print(f"🔍 video_latent_5d shape: {video_latent_5d.shape}")
-                    
-                    # Apply mask: mask_latents is (1, 1, 1, 64, 64), need to expand to match 4 channels
-                    # Expand mask to 4 channels: (1, 1, 1, 64, 64) -> (1, 4, 1, 64, 64)
                     mask_expanded = mask_latents[:1].repeat(1, 4, 1, 1, 1)
-                    print(f"🔍 mask_expanded shape: {mask_expanded.shape}")
-                    
                     masked_image_latents = video_latent_5d * (1 - mask_expanded)
-                    print(f"🔍 Initial masked_image_latents shape: {masked_image_latents.shape}")
                     
-                    # Duplicate masked image latents for classifier-free guidance if needed
                     if do_classifier_free_guidance:
                         masked_image_latents = torch.cat([masked_image_latents] * 2)
-                        print(f"🔍 CFG masked_image_latents shape: {masked_image_latents.shape}")
                     
-                    # Add temporal dimension to video_latent for reference
                     ref_latents = video_latent_5d
-                    print(f"🔍 Initial ref_latents shape: {ref_latents.shape}")
-                    
-                    # Duplicate reference latents for classifier-free guidance if needed
                     if do_classifier_free_guidance:
                         ref_latents = torch.cat([ref_latents] * 2)
-                        print(f"🔍 CFG ref_latents shape: {ref_latents.shape}")
                     
-                    # 🧹 Clean up intermediate tensors
+                    # Clean up intermediate tensors immediately
                     del video_latent, video_latent_5d, mask_expanded, mouth_mask
                     torch.cuda.empty_cache()
                     
-                    # 4. Setup proper DDIM scheduler (following lipsync_pipeline.py and inference.py)
-                    # Use actual DDIM scheduler instead of manual creation
+                    # 🏗️ STEP 4: Ultra-minimal DDIM scheduler
                     scheduler = DDIMScheduler(
                         num_train_timesteps=1000,
                         beta_start=0.00085,
@@ -522,175 +493,68 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         prediction_type="epsilon"
                     )
                     
-                    # Set timesteps for inference (following lipsync_pipeline.py)
                     scheduler.set_timesteps(num_inference_steps, device=device)
                     timesteps = scheduler.timesteps
-                    
-                    # 5. Initialize latents with noise (following lipsync_pipeline.py: prepare_latents)
-                    # Scale initial noise by scheduler.init_noise_sigma (standard DDIM initialization)
                     latents = noise * scheduler.init_noise_sigma
-                    del noise  # Clean up noise tensor
+                    del noise
                     
-                    # 6. Denoising loop (following lipsync_pipeline.py structure)
+                    # 🏗️ STEP 5: Minimal denoising loop with aggressive cleanup
                     for i, t in enumerate(timesteps):
-                        # 🧹 Aggressive memory cleanup every iteration
-                        torch.cuda.empty_cache()
+                        torch.cuda.empty_cache()  # Clean before each step
                         
-                        # Expand latents for classifier-free guidance
                         latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                        
-                        # Scale model input (following lipsync_pipeline.py: scheduler.scale_model_input)
                         latent_model_input = scheduler.scale_model_input(latent_model_input, t)
                         
-                        # 🔍 Debug tensor shapes before concatenation (only first iteration)
-                        if i == 0:
-                            print(f"🔍 latent_model_input shape: {latent_model_input.shape}")
-                            print(f"🔍 mask_latents shape: {mask_latents.shape}")
-                            print(f"🔍 masked_image_latents shape: {masked_image_latents.shape}")
-                            print(f"🔍 ref_latents shape: {ref_latents.shape}")
-                        
-                        # Concatenate all inputs: [latents, mask, masked_image, ref]
-                        # Following train_unet.py line 350: torch.cat([noisy_gt_latents, masks, masked_latents, ref_latents], dim=1)
+                        # Concatenate inputs
                         concatenated_latents = torch.cat(
                             [latent_model_input, mask_latents, masked_image_latents, ref_latents], 
                             dim=1
                         )
                         
-                        # 🧹 Clean up intermediate tensor immediately
-                        del latent_model_input
+                        del latent_model_input  # Immediate cleanup
                         
-                        # Run ONNX inference for this timestep
+                        # ONNX inference
                         noise_pred = lip_syncer.run(None, {
                             'sample': concatenated_latents.cpu().numpy().astype(numpy.float16),
                             'timesteps': numpy.array([t.cpu().numpy()], dtype=numpy.int64),
                             'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float16)
                         })[0]
                         
-                        # 🔍 Debug ONNX output shape
-                        if i == 0:  # Only print on first iteration
-                            print(f"🔍 ONNX noise_pred shape: {noise_pred.shape}")
-                            print(f"🔍 ONNX noise_pred dtype: {noise_pred.dtype}")
-                        
-                        # 🧹 Clean up concatenated tensor immediately
-                        del concatenated_latents
-                        
-                        # Convert back to torch tensor
+                        del concatenated_latents  # Immediate cleanup
                         noise_pred = torch.from_numpy(noise_pred).to(device)
                         
-                        # Perform guidance if needed (following lipsync_pipeline.py line 450-452)
                         if do_classifier_free_guidance:
                             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-                            # Clean up intermediate tensors
                             del noise_pred_uncond, noise_pred_cond
                         
-                        # DDIM update using scheduler.step() (following lipsync_pipeline.py)
                         latents = scheduler.step(noise_pred, t, latents).prev_sample
-                        
-                        # 🧹 Clean up noise prediction
-                        del noise_pred
+                        del noise_pred  # Immediate cleanup
+                        torch.cuda.empty_cache()  # Clean after each step
                     
-                    # Final output is the denoised latents
                     output_latent = latents
                     
-                    # 🔍 Debug final output shape
-                    print(f"🔍 Final output_latent shape: {output_latent.shape}")
-                    print(f"🔍 Final output_latent dtype: {output_latent.dtype}")
-                    print(f"🔍 Final output_latent min/max: {output_latent.min().item():.4f}/{output_latent.max().item():.4f}")
-                    
-                    # 🧹 Comprehensive cleanup
-                    for var in ['audio_tensor', 'video_latent', 'noise_pred', 'output_latent', 'latents', 
-                               'mask_latents', 'masked_image_latents', 'ref_latents', 'concatenated_latents',
-                               'latent_model_input', 'noise', 'mouth_mask']:
-                        if var in locals():
-                            del locals()[var]
+                    # Clean up all remaining tensors before VAE decode
+                    del audio_tensor, mask_latents, masked_image_latents, ref_latents, latents
                     torch.cuda.empty_cache()
                     
-                    # 🧹 Safer model offloading to save memory during video processing
-                    if torch.cuda.is_available():
-                        try:
-                            # Only offload if we're processing video (multiple frames)
-                            # Don't offload for single image processing
-                            pass  # Disable offloading for now to prevent CUDA errors
-                            # if audio_encoder is not None and hasattr(audio_encoder, 'model'):
-                            #     audio_encoder.model.cpu()
-                            # if vae is not None:
-                            #     vae.cpu()
-                            # torch.cuda.empty_cache()
-                            # print("🧹 Temporarily moved models to CPU to save GPU memory")
-                        except Exception as e:
-                            print(f"⚠️ Model offloading failed: {e}")
-
-                    if output_latent is None:
-                        raise RuntimeError("ONNX inference returned None.")
-
-                    # Convert numpy array to torch tensor if needed
-                    if isinstance(output_latent, numpy.ndarray):
-                        output_latent = torch.from_numpy(output_latent).to(torch.float16).to(device)
-
-                    # Convert Input: (1, 4, 1, 64, 64) to Output: (512, 512, 3) for downstream transpose
-                    print(f"🔍 About to call normalize_latentsync_frame with shape: {output_latent.shape}")
-                    close_vision_frame = normalize_latentsync_frame(output_latent)
+                    print(f"🔍 Final output_latent shape: {output_latent.shape}")
+                    print(f"🔍 About to decode with VAE...")
                     
-                    # 🧹 Final cleanup
+                    # 🏗️ STEP 6: VAE decode with ultra-conservative memory management
+                    close_vision_frame = normalize_latentsync_frame_conservative(output_latent)
+                    
                     del output_latent
                     torch.cuda.empty_cache()
-
-                    # After model inference
+                    
                     print("🔍 Model output shape:", close_vision_frame.shape if close_vision_frame is not None else "None")
-                    print("🔍 Model output dtype:", close_vision_frame.dtype if close_vision_frame is not None else "None")
+                    
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
-                    logger.error(f"❌ OOM during LatentSync processing! Try reducing video resolution or disabling CFG.", __name__)
-                    # 🧹 Emergency cleanup
+                    logger.error(f"❌ OOM during LatentSync processing! Memory is critically low.", __name__)
                     torch.cuda.empty_cache()
-                    
-                    # 🔥 EMERGENCY: Try with minimal settings
-                    print("🆘 Attempting emergency recovery with minimal settings...")
-                    try:
-                        with torch.no_grad():
-                            # Ultra-minimal settings for emergency recovery
-                            guidance_scale = 1.0  # Disable CFG completely
-                            num_inference_steps = 3  # Absolute minimum
-                            do_classifier_free_guidance = False
-                            
-                            # Simple audio processing without CFG
-                            audio_tensor = prepare_latentsync_audio(temp_audio_frame, sample_rate=16000)
-                            video_latent = prepare_latentsync_frame(close_vision_frame)
-                            
-                            # Skip complex masking and use simple noise
-                            noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float16, device=device)
-                            latents = noise
-                            
-                            # Minimal denoising (just 3 steps)
-                            scheduler = DDIMScheduler(num_train_timesteps=1000, beta_start=0.00085, beta_end=0.012, beta_schedule="linear")
-                            scheduler.set_timesteps(num_inference_steps, device=device)
-                            
-                            for t in scheduler.timesteps:
-                                # Simplified input without masking
-                                concatenated_latents = torch.cat([latents, video_latent.unsqueeze(2)], dim=1)
-                                
-                                noise_pred = lip_syncer.run(None, {
-                                    'sample': concatenated_latents.cpu().numpy().astype(numpy.float16),
-                                    'timesteps': numpy.array([t.cpu().numpy()], dtype=numpy.int64),
-                                    'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float16)
-                                })[0]
-                                
-                                noise_pred = torch.from_numpy(noise_pred).to(device)
-                                latents = scheduler.step(noise_pred, t, latents).prev_sample
-                                
-                                # Aggressive cleanup each step
-                                del concatenated_latents, noise_pred
-                                torch.cuda.empty_cache()
-                            
-                            output_latent = latents
-                            close_vision_frame = normalize_latentsync_frame(output_latent)
-                            print("✅ Emergency recovery successful!")
-                            
-                    except Exception as recovery_error:
-                        print(f"❌ Emergency recovery also failed: {recovery_error}")
-                        # Final fallback: return original frame
-                        return close_vision_frame
+                    # Return original frame as last resort
+                    return close_vision_frame
                 else:
                     logger.error(f"LatentSync processing failed: {str(e)}", __name__)
                     return close_vision_frame
@@ -698,7 +562,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                 logger.error(f"LatentSync processing failed: {str(e)}", __name__)
                 return close_vision_frame
         else:
-            # Wav2Lip-style direct inference with image and mel-spectrogram
+            # Wav2Lip-style direct inference
             print("🚀 Executing Wav2Lip path...")
             print(f"🔍 Wav2Lip input shapes - audio: {temp_audio_frame.shape}, vision: {close_vision_frame.shape}")
             
@@ -878,7 +742,20 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 print(f"🔍 File exists: {os.path.exists(temp_audio_path)}")
                 print(f"🔍 File size: {os.path.getsize(temp_audio_path) if os.path.exists(temp_audio_path) else 'N/A'} bytes")
                 
+                # 🔧 ENSURE ENCODER IS ON GPU FOR PROCESSING
+                if torch.cuda.is_available() and hasattr(encoder, 'model'):
+                    if encoder.model.device.type != 'cuda':
+                        encoder.model = encoder.model.cuda()
+                        print("🔄 Moved audio encoder to GPU for processing")
+                
                 audio_feat = encoder.audio2feat(temp_audio_path)
+                
+                # 🔧 IMMEDIATELY MOVE ENCODER BACK TO CPU
+                if torch.cuda.is_available() and hasattr(encoder, 'model'):
+                    encoder.model = encoder.model.cpu()
+                    print("🔄 Moved audio encoder back to CPU")
+                torch.cuda.empty_cache()
+                
                 print(f"🔍 Audio2feat returned shape: {audio_feat.shape}")
                 print(f"🔍 Audio2feat returned dtype: {audio_feat.dtype}")
                 
@@ -1042,81 +919,78 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
 
 
-# Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
-# Input: (1, 4, 1, 64, 64) → Output: (512, 512, 3) BGR for OpenCV
-def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
+# Ultra-conservative VAE decode that immediately offloads VAE after use
+def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame:
+    """
+    Ultra-conservative VAE decode that immediately moves VAE back to CPU after use
+    to prevent OOM issues in memory-constrained environments.
+    """
     if not isinstance(latent, torch.Tensor):
         raise TypeError("Input must be a torch tensor")
     
     try:
-        print(f"🔍 normalize_latentsync_frame input shape: {latent.shape}")
-        print(f"🔍 normalize_latentsync_frame input dtype: {latent.dtype}")
+        print(f"🔍 Conservative decode input shape: {latent.shape}")
         
-        # Handle different input shapes - following lipsync_pipeline.py decode_latents
+        # Handle different input shapes
         if latent.ndim == 5:
-            # Input: (1, 4, 1, 64, 64) - keep as is for rearrange
-            pass
+            pass  # (1, 4, 1, 64, 64) - keep as is
         elif latent.ndim == 4:
-            # Input: (1, 4, 64, 64) - add temporal dimension
             latent = latent.unsqueeze(2)  # → (1, 4, 1, 64, 64)
         elif latent.ndim == 3:
-            # Input: (4, 64, 64) - add batch and temporal dimensions
             latent = latent.unsqueeze(0).unsqueeze(2)  # → (1, 4, 1, 64, 64)
         else:
             raise ValueError(f"Unexpected latent shape: {latent.shape}")
         
-        # Check if we have the expected number of channels (4 for VAE latents)
+        # Ensure we have 4 channels
         if latent.shape[1] != 4:
-            print(f"⚠️ Warning: Expected 4 channels, got {latent.shape[1]}. Attempting to extract first 4 channels.")
             if latent.shape[1] >= 4:
                 latent = latent[:, :4, ...]  # Take first 4 channels
             else:
                 raise ValueError(f"Not enough channels: expected 4, got {latent.shape[1]}")
 
         with torch.no_grad():
-            print("🔍 Before VAE decode - latent shape:", latent.shape)
-            print("🔍 Before VAE decode - latent min/max:", latent.min().item(), latent.max().item())
-
-            # 🔧 CRITICAL FIX: Ensure VAE model and input are on same device
-            vae_model = get_vae()
-            target_device = vae_model.device
+            # 🔧 CRITICAL: Move VAE back to GPU only when needed
+            global vae
+            vae_model = get_vae()  # This will load it if needed
             
-            # Move latent to same device as VAE model
-            latent = latent.to(target_device, dtype=torch.float16)
-            print(f"🔧 Moved latent to {target_device} to match VAE device")
+            # Ensure VAE is on GPU for decode
+            if vae_model.device.type != 'cuda':
+                vae_model = vae_model.cuda()
+                print("🔄 Moved VAE to GPU for decode")
             
-            # Following lipsync_pipeline.py decode_latents method exactly:
-            # Step 1: Apply VAE scaling (line 142)
+            # Move latent to same device as VAE
+            latent = latent.to(vae_model.device, dtype=torch.float16)
+            
+            # Apply VAE scaling
             vae_config = vae_model.config
-            shift_factor = getattr(vae_config, 'shift_factor', 0.0)
-            scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215)
-            
-            # Handle None values explicitly
-            if shift_factor is None:
-                shift_factor = 0.0
-            if scaling_factor is None:
-                scaling_factor = 0.18215
+            shift_factor = getattr(vae_config, 'shift_factor', 0.0) or 0.0
+            scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215) or 0.18215
             
             latents = latent / scaling_factor + shift_factor
             
-            # Step 2: Reshape for VAE decode (line 143)
+            # Reshape for VAE decode
             from einops import rearrange
             latents = rearrange(latents, "b c f h w -> (b f) c h w")  # (1, 4, 1, 64, 64) → (1, 4, 64, 64)
             
-            # Step 3: VAE decode (line 144)
-            decoded_latents = vae_model.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
-
-            print("🔍 After VAE decode - raw shape:", decoded_latents.shape)
-            print("🔍 After VAE decode - raw min/max:", decoded_latents.min().item(), decoded_latents.max().item())
+            print(f"🔍 About to VAE decode shape: {latents.shape}")
             
-            # 🛠️ Handle unexpected channel count from VAE
+            # VAE decode
+            decoded_latents = vae_model.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
+            
+            # 🔧 IMMEDIATELY move VAE back to CPU to free GPU memory
+            vae_model = vae_model.cpu()
+            vae = vae_model  # Update global reference
+            print("🔄 Moved VAE back to CPU")
+            torch.cuda.empty_cache()
+            
+            print(f"🔍 VAE decode output shape: {decoded_latents.shape}")
+            
+            # Handle unexpected channel count
             if decoded_latents.shape[1] == 6:
                 print("⚠️ VAE returned 6 channels, extracting first 3 (RGB)")
-                decoded_latents = decoded_latents[:, :3, :, :]  # Take first 3 channels
-                print("🔍 After channel extraction - shape:", decoded_latents.shape)
+                decoded_latents = decoded_latents[:, :3, :, :]
             elif decoded_latents.shape[1] != 3:
                 print(f"⚠️ Unexpected channel count: {decoded_latents.shape[1]}, expected 3")
-                # If we have more than 3 channels, take the first 3
                 if decoded_latents.shape[1] > 3:
                     decoded_latents = decoded_latents[:, :3, :, :]
                 else:
@@ -1125,32 +999,31 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             del latent, latents
             torch.cuda.empty_cache()
 
-            # Following lipsync_pipeline.py pixel_values_to_images method (line 254-257):
-            # Step 1: Rearrange dimensions
+            # Convert to image format
             pixel_values = rearrange(decoded_latents, "f c h w -> f h w c")  # (1, 3, 512, 512) → (1, 512, 512, 3)
-            
-            # Step 2: Normalize to [0, 1]
             pixel_values = (pixel_values / 2 + 0.5).clamp(0, 1)
-            
-            # Step 3: Convert to uint8
             images = (pixel_values * 255).to(torch.uint8)
-            
-            # Step 4: Convert to numpy and remove batch dimension
             image = images[0].cpu().numpy()  # (512, 512, 3)
             
-            print("🔍 After normalization - shape:", image.shape)
-            print("🔍 After normalization - min/max:", image.min(), image.max())
+            del decoded_latents, pixel_values, images
+            torch.cuda.empty_cache()
             
-            # Convert RGB → BGR for OpenCV compatibility
+            # Convert RGB → BGR for OpenCV
             image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-
-            print("🧪 Final normalized frame shape:", image_bgr.shape)
-            print("🧪 Final normalized frame - dtype:", image_bgr.dtype)
-
-        return image_bgr  # (512, 512, 3) BGR uint8
+            
+            print(f"🔍 Final image shape: {image_bgr.shape}")
+            return image_bgr
 
     except Exception as e:
-        raise RuntimeError(f"❌ Failed to normalize frame: {str(e)}")
+        # Emergency cleanup
+        global vae
+        if vae is not None:
+            try:
+                vae = vae.cpu()
+                torch.cuda.empty_cache()
+            except:
+                pass
+        raise RuntimeError(f"❌ Conservative decode failed: {str(e)}")
 
 
 def get_reference_frame(source_face : Face, target_face : Face, temp_vision_frame : VisionFrame) -> VisionFrame:
@@ -1176,6 +1049,21 @@ def process_frame(inputs : LipSyncerInputs) -> VisionFrame:
 		if similar_faces:
 			for similar_face in similar_faces:
 				target_vision_frame = sync_lip(similar_face, source_audio_frame, target_vision_frame)
+	
+	# 🧹 AGGRESSIVE CLEANUP after each frame to prevent memory leaks
+	model_name = state_manager.get_item('lip_syncer_model')
+	if model_name == 'latentsync':
+		# Force models to CPU and cleanup
+		global audio_encoder, vae
+		try:
+			if audio_encoder is not None and hasattr(audio_encoder, 'model'):
+				audio_encoder.model = audio_encoder.model.cpu()
+			if vae is not None:
+				vae = vae.cpu()
+			torch.cuda.empty_cache()
+		except Exception as cleanup_error:
+			print(f"⚠️ Cleanup warning: {cleanup_error}")
+	
 	return target_vision_frame
 
 
