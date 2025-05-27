@@ -820,11 +820,24 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             # Step 3: VAE decode (line 144)
             decoded_latents = get_vae().decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
 
-            del latent, latents
-            torch.cuda.empty_cache()
-
             print("🔍 After VAE decode - raw shape:", decoded_latents.shape)
             print("🔍 After VAE decode - raw min/max:", decoded_latents.min().item(), decoded_latents.max().item())
+            
+            # 🛠️ Handle unexpected channel count from VAE
+            if decoded_latents.shape[1] == 6:
+                print("⚠️ VAE returned 6 channels, extracting first 3 (RGB)")
+                decoded_latents = decoded_latents[:, :3, :, :]  # Take first 3 channels
+                print("🔍 After channel extraction - shape:", decoded_latents.shape)
+            elif decoded_latents.shape[1] != 3:
+                print(f"⚠️ Unexpected channel count: {decoded_latents.shape[1]}, expected 3")
+                # If we have more than 3 channels, take the first 3
+                if decoded_latents.shape[1] > 3:
+                    decoded_latents = decoded_latents[:, :3, :, :]
+                else:
+                    raise ValueError(f"Not enough channels: got {decoded_latents.shape[1]}, need 3")
+
+            del latent, latents
+            torch.cuda.empty_cache()
 
             # Following lipsync_pipeline.py pixel_values_to_images method (line 254-257):
             # Step 1: Rearrange dimensions
