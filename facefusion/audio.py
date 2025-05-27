@@ -137,3 +137,29 @@ def extract_audio_frames(spectrogram : Spectrogram, fps : Fps) -> List[AudioFram
 		start = max(0, index - step_size)
 		audio_frames.append(spectrogram[:, start:index])
 	return audio_frames
+
+
+def get_raw_audio_frame(audio_path : str, fps : Fps, frame_number : int = 0) -> Optional[numpy.ndarray]:
+	"""Get raw audio waveform frame for a specific frame number"""
+	if is_audio(audio_path):
+		# LatentSync uses 16kHz for Whisper, not 48kHz
+		sample_rate = 16000
+		channel_total = 2
+		
+		audio_buffer = read_audio_buffer(audio_path, sample_rate, channel_total)
+		audio = numpy.frombuffer(audio_buffer, dtype = numpy.int16).reshape(-1, 2)
+		audio = prepare_audio(audio)  # Convert to mono and normalize
+		
+		# Calculate frame duration in samples
+		frame_duration_samples = int(sample_rate / fps)
+		start_sample = frame_number * frame_duration_samples
+		end_sample = start_sample + frame_duration_samples
+		
+		# Extract the audio segment for this frame
+		if start_sample < len(audio):
+			audio_frame = audio[start_sample:end_sample]
+			# Pad with zeros if needed
+			if len(audio_frame) < frame_duration_samples:
+				audio_frame = numpy.pad(audio_frame, (0, frame_duration_samples - len(audio_frame)), mode='constant')
+			return audio_frame
+	return None
