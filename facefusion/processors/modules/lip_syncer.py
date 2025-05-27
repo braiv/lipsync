@@ -483,7 +483,6 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     print(f"🔍 Audio tensor shape: {audio_tensor.shape}")
                     
                     # 🧹 IMMEDIATELY offload audio encoder to CPU to save memory
-                    global audio_encoder
                     if audio_encoder is not None and hasattr(audio_encoder, 'model'):
                         audio_encoder.model = audio_encoder.model.cpu()
                         print("🔄 Moved audio encoder to CPU")
@@ -501,7 +500,6 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     video_latent = prepare_latentsync_frame(close_vision_frame)
                     
                     # 🧹 IMMEDIATELY offload VAE to CPU after encoding
-                    global vae
                     if vae is not None:
                         vae = vae.cpu()
                         print("🔄 Moved VAE to CPU after encoding")
