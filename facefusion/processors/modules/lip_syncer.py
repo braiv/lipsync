@@ -434,22 +434,27 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     
                     # 3. Create masked image latents
                     # Apply mask to video latents (mask out mouth region)
-                    masked_image_latents = video_latent * (1 - mask_latents[:1, 0:1])  # Use first mask, expand to 4 channels
-                    masked_image_latents = masked_image_latents.unsqueeze(2)  # Add temporal dimension
+                    # First, ensure video_latent has temporal dimension: (1, 4, 64, 64) -> (1, 4, 1, 64, 64)
+                    video_latent_5d = video_latent.unsqueeze(2)
+                    
+                    # Apply mask: mask_latents is (1, 1, 1, 64, 64), need to expand to match 4 channels
+                    # Expand mask to 4 channels: (1, 1, 1, 64, 64) -> (1, 4, 1, 64, 64)
+                    mask_expanded = mask_latents[:1].repeat(1, 4, 1, 1, 1)
+                    masked_image_latents = video_latent_5d * (1 - mask_expanded)
                     
                     # Duplicate masked image latents for classifier-free guidance if needed
                     if do_classifier_free_guidance:
                         masked_image_latents = torch.cat([masked_image_latents] * 2)
                     
                     # Add temporal dimension to video_latent for reference
-                    ref_latents = video_latent.unsqueeze(2)
+                    ref_latents = video_latent_5d
                     
                     # Duplicate reference latents for classifier-free guidance if needed
                     if do_classifier_free_guidance:
                         ref_latents = torch.cat([ref_latents] * 2)
                     
                     # 🧹 Clean up intermediate tensors
-                    del video_latent, mouth_mask
+                    del video_latent, video_latent_5d, mask_expanded, mouth_mask
                     torch.cuda.empty_cache()
                     
                     # 4. Setup proper DDIM scheduler (following lipsync_pipeline.py and inference.py)
@@ -485,6 +490,13 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         
                         # Scale model input (following lipsync_pipeline.py: scheduler.scale_model_input)
                         latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+                        
+                        # 🔍 Debug tensor shapes before concatenation (only first iteration)
+                        if i == 0:
+                            print(f"🔍 latent_model_input shape: {latent_model_input.shape}")
+                            print(f"🔍 mask_latents shape: {mask_latents.shape}")
+                            print(f"🔍 masked_image_latents shape: {masked_image_latents.shape}")
+                            print(f"🔍 ref_latents shape: {ref_latents.shape}")
                         
                         # Concatenate all inputs: [latents, mask, masked_image, ref]
                         # Following train_unet.py line 350: torch.cat([noisy_gt_latents, masks, masked_latents, ref_latents], dim=1)
