@@ -779,6 +779,12 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             # Add batch dimension to make it (1, N, 384)
             if audio_feat.ndim == 2:
                 audio_feat = audio_feat.unsqueeze(0)  # (N, 384) -> (1, N, 384)
+            elif audio_feat.ndim == 3:
+                # Handle case where Audio2Feature returns [B, T, F] format
+                # Flatten batch and time dimensions: [B, T, F] -> [1, B*T, F]
+                B, T, F = audio_feat.shape
+                audio_feat = audio_feat.reshape(1, B * T, F)
+                print(f"🔍 Reshaped 3D audio_feat from [{B}, {T}, {F}] to {audio_feat.shape}")
             
             print(f"🔍 Final audio_feat shape: {audio_feat.shape}")
             
