@@ -389,6 +389,8 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
 
 
 def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> VisionFrame:
+    global audio_encoder, vae  # Move global declarations to top
+    
     lip_syncer = None  # Initialize to None
     model_name = state_manager.get_item('lip_syncer_model')
     
@@ -402,7 +404,6 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
         torch.cuda.synchronize()
         
         # Force cleanup of our models to make room for ONNX
-        global audio_encoder, vae
         try:
             if audio_encoder is not None and hasattr(audio_encoder, 'model'):
                 audio_encoder.model = audio_encoder.model.cpu()
@@ -1086,6 +1087,8 @@ def get_reference_frame(source_face : Face, target_face : Face, temp_vision_fram
 
 
 def process_frame(inputs : LipSyncerInputs) -> VisionFrame:
+	global audio_encoder, vae  # Move global declarations to top
+	
 	reference_faces = inputs.get('reference_faces')
 	source_audio_frame = inputs.get('source_audio_frame')
 	target_vision_frame = inputs.get('target_vision_frame')
@@ -1109,7 +1112,6 @@ def process_frame(inputs : LipSyncerInputs) -> VisionFrame:
 	model_name = state_manager.get_item('lip_syncer_model')
 	if model_name == 'latentsync':
 		# Force models to CPU and cleanup
-		global audio_encoder, vae
 		try:
 			if audio_encoder is not None and hasattr(audio_encoder, 'model'):
 				audio_encoder.model = audio_encoder.model.cpu()
