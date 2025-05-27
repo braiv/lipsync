@@ -298,7 +298,16 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
 
     # --- Lip Sync Forward ---
     close_vision_frame, close_matrix = warp_face_by_bounding_box(crop_vision_frame, bounding_box, model_size)
-    close_vision_frame = prepare_crop_frame(close_vision_frame)
+    
+    # Different preprocessing based on model type
+    if model_name == 'latentsync':
+        # LatentSync expects regular BGR image (512, 512, 3)
+        # No special preprocessing needed - just pass the warped frame directly
+        pass
+    else:
+        # Wav2Lip expects concatenated format (1, 6, H, W)
+        close_vision_frame = prepare_crop_frame(close_vision_frame)
+    
     close_vision_frame = forward(temp_audio_frame, close_vision_frame)
     
     # --- Process model output based on model type ---
