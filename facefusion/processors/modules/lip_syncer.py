@@ -33,6 +33,25 @@ from facefusion.vision import read_image, read_static_image, restrict_video_fps,
 from diffusers.models import AutoencoderKL
 from diffusers import DDIMScheduler
 
+# Add LatentSync to Python path
+import sys
+import os
+
+# Try multiple possible LatentSync locations
+latentsync_paths = [
+    "/home/cody_braiv_co/latent-sync",
+    "../latent-sync",
+    "../../latent-sync",
+    os.path.expanduser("~/latent-sync"),
+    os.path.expanduser("~/braiv-lipsync/latent-sync")
+]
+
+for path in latentsync_paths:
+    if os.path.exists(path) and path not in sys.path:
+        sys.path.append(path)
+        print(f"✅ Added LatentSync path: {path}")
+        break
+
 # Import Audio2Feature from the LatentSync package (optional)
 try:
     from latentsync.whisper.audio2feature import Audio2Feature
