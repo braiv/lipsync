@@ -83,14 +83,21 @@ def get_audio_encoder():
             available_gb = available_memory / 1024**3
             print(f"💾 Available memory before audio encoder: {available_gb:.1f} GB")
             
-            # Always load on GPU for better performance
-            audio_device = device
+            # Always load on CPU first to avoid dtype issues
+            audio_device = "cpu"
         else:
-            audio_device = device
+            audio_device = "cpu"
             
         try:
             # Use built-in Whisper 'tiny' model instead of checkpoint file
             audio_encoder = Audio2Feature(model_path="tiny", device=audio_device)
+            
+            # 🔧 CRITICAL: Ensure audio encoder uses float32 precision
+            if hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
+                # Force float32 precision to avoid dtype mismatch
+                audio_encoder.model = audio_encoder.model.float()
+                print("🔧 Set audio encoder to float32 precision")
+            
             print("✅ Audio encoder loaded.")
             
             # Test the encoder with a small sample to ensure it works
@@ -117,10 +124,11 @@ def get_audio_encoder():
             print(f"❌ Failed to load audio encoder: {load_error}")
             raise RuntimeError(f"Could not initialize Audio2Feature: {load_error}")
     else:
-        # Ensure audio encoder is on the correct device
+        # Ensure audio encoder is on the correct device and precision
         if torch.cuda.is_available() and hasattr(audio_encoder, 'model') and audio_encoder.model.device.type != 'cuda':
-            audio_encoder.model = audio_encoder.model.cuda()
-            print("🔄 Moved audio encoder to GPU")
+            # Move to GPU with consistent float32 precision
+            audio_encoder.model = audio_encoder.model.float().cuda()
+            print("🔄 Moved audio encoder to GPU with float32 precision")
     return audio_encoder
 
 def get_vae():
@@ -133,18 +141,19 @@ def get_vae():
             available_gb = available_memory / 1024**3
             print(f"💾 Available memory before VAE: {available_gb:.1f} GB")
             
-            # Always load on GPU for better performance
-            vae_device = "cuda"
+            # Load on CPU first to avoid dtype issues
+            vae_device = "cpu"
         else:
             vae_device = "cpu"
             
-        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(vae_device).half().eval()
-        print("✅ VAE loaded.")
+        # 🔧 Use float32 instead of half precision to avoid dtype mismatches
+        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(vae_device).float().eval()
+        print("✅ VAE loaded with float32 precision.")
     else:
-        # Ensure VAE is on the correct device
+        # Ensure VAE is on the correct device with consistent precision
         if torch.cuda.is_available() and vae.device.type != 'cuda':
-            vae = vae.cuda()
-            print("🔄 Moved VAE to GPU")
+            vae = vae.float().cuda()
+            print("🔄 Moved VAE to GPU with float32 precision")
     return vae
 
 def get_projection_weight():
@@ -452,11 +461,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     torch.cuda.empty_cache()
                     
                     # 🏗️ STEP 3: Setup minimal diffusion (ultra-conservative)
-                    noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float16, device=device)
+                    noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float32, device=device)
                     
                     # Simple mouth mask (no complex masking to save memory)
                     mask_height, mask_width = 64, 64
-                    mouth_mask = torch.zeros((mask_height, mask_width), dtype=torch.float16, device=device)
+                    mouth_mask = torch.zeros((mask_height, mask_width), dtype=torch.float32, device=device)
                     mouth_y_start, mouth_y_end = int(mask_height * 0.6), int(mask_height * 0.9)
                     mouth_x_start, mouth_x_end = int(mask_width * 0.3), int(mask_width * 0.7)
                     mouth_mask[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end] = 1.0
@@ -515,9 +524,9 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         
                         # ONNX inference
                         noise_pred = lip_syncer.run(None, {
-                            'sample': concatenated_latents.cpu().numpy().astype(numpy.float16),
+                            'sample': concatenated_latents.cpu().numpy().astype(numpy.float32),
                             'timesteps': numpy.array([t.cpu().numpy()], dtype=numpy.int64),
-                            'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float16)
+                            'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float32)
                         })[0]
                         
                         del concatenated_latents  # Immediate cleanup
@@ -745,8 +754,9 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 # 🔧 ENSURE ENCODER IS ON GPU FOR PROCESSING
                 if torch.cuda.is_available() and hasattr(encoder, 'model'):
                     if encoder.model.device.type != 'cuda':
-                        encoder.model = encoder.model.cuda()
-                        print("🔄 Moved audio encoder to GPU for processing")
+                        # Move to GPU with consistent float32 precision
+                        encoder.model = encoder.model.float().cuda()
+                        print("🔄 Moved audio encoder to GPU with float32 precision")
                 
                 audio_feat = encoder.audio2feat(temp_audio_path)
                 
@@ -786,8 +796,8 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 if audio_feat.shape[2] != 384:
                     raise ValueError(f"Expected 384 features, got {audio_feat.shape[2]}")
                 
-                # Convert to float16 and move to the correct device
-                audio_feat = audio_feat.to(device, dtype=torch.float16)
+                # Convert to float32 and move to the correct device
+                audio_feat = audio_feat.to(device, dtype=torch.float32)
                 
                 print(f"🔍 Returning audio tensor shape: {audio_feat.shape}")
                 return audio_feat
@@ -803,7 +813,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 audio_duration_seconds = len(raw_audio_waveform) / sample_rate
                 estimated_tokens = max(10, int(audio_duration_seconds * 50))  # ~50 tokens per second
                 print(f"🔧 Creating fallback audio tensor with {estimated_tokens} tokens for {audio_duration_seconds:.2f}s audio")
-                fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float16, device=device)
+                fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float32, device=device)
                 return fallback_tensor
             
         finally:
@@ -825,7 +835,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
         else:
             estimated_tokens = 25  # Default fallback
             
-        fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float16, device=device)
+        fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float32, device=device)
         print(f"🔧 Fallback tensor shape: {fallback_tensor.shape}")
         return fallback_tensor
 
@@ -856,17 +866,16 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         resized = cv2.resize(frame_rgb, (512, 512))
         print("✅ Resized frame to 512x512")
 
-        # ✅ Normalize to [-1, 1] in float32 then convert to float16
+        # ✅ Normalize to [-1, 1] in float32 then keep as float32
         normalized = resized.astype(numpy.float32) / 255.0
         normalized = (normalized * 2.0) - 1.0
-        normalized = normalized.astype(numpy.float16)
 
         # ✅ Change shape to (1, 3, 512, 512)
         tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
-        # ✅ Move to device
+        # ✅ Move to device with float32 precision
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        tensor = tensor.to(device).to(torch.float16)
+        tensor = tensor.to(device).to(torch.float32)
 
         # ✅ Encode with VAE to get latent representation
         with torch.no_grad():
@@ -907,7 +916,7 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
             
             # Correct scaling: (latents - shift_factor) * scaling_factor
             latent = (latent - shift_factor) * scaling_factor
-            latent = latent.to(torch.float16)
+            latent = latent.to(torch.float32)
             
             print("🔍 VAE latent shape:", latent.shape)
             print("🔍 VAE latent - min/max:", latent.min().item(), latent.max().item())
@@ -956,11 +965,11 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
             
             # Ensure VAE is on GPU for decode
             if vae_model.device.type != 'cuda':
-                vae_model = vae_model.cuda()
-                print("🔄 Moved VAE to GPU for decode")
+                vae_model = vae_model.float().cuda()
+                print("🔄 Moved VAE to GPU for decode with float32 precision")
             
-            # Move latent to same device as VAE
-            latent = latent.to(vae_model.device, dtype=torch.float16)
+            # Move latent to same device as VAE with float32 precision
+            latent = latent.to(vae_model.device, dtype=torch.float32)
             
             # Apply VAE scaling
             vae_config = vae_model.config
