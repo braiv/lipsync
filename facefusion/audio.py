@@ -75,6 +75,12 @@ def create_empty_audio_frame() -> AudioFrame:
 	return audio_frame
 
 
+def create_empty_raw_audio_frame(fps: Fps, sample_rate: int = 16000) -> numpy.ndarray:
+	"""Create empty raw audio frame for LatentSync (FP32 format)"""
+	frame_duration_samples = int(sample_rate / fps)
+	return numpy.zeros(frame_duration_samples, dtype=numpy.float32)
+
+
 def prepare_audio(audio : Audio) -> Audio:
 	if audio.ndim > 1:
 		audio = numpy.mean(audio, axis = 1)
@@ -150,6 +156,9 @@ def get_raw_audio_frame(audio_path : str, fps : Fps, frame_number : int = 0) -> 
 		audio = numpy.frombuffer(audio_buffer, dtype = numpy.int16).reshape(-1, 2)
 		audio = prepare_audio(audio)  # Convert to mono and normalize
 		
+		# Ensure FP32 consistency for LatentSync
+		audio = audio.astype(numpy.float32)
+		
 		# Calculate frame duration in samples
 		frame_duration_samples = int(sample_rate / fps)
 		start_sample = frame_number * frame_duration_samples
@@ -161,5 +170,5 @@ def get_raw_audio_frame(audio_path : str, fps : Fps, frame_number : int = 0) -> 
 			# Pad with zeros if needed
 			if len(audio_frame) < frame_duration_samples:
 				audio_frame = numpy.pad(audio_frame, (0, frame_duration_samples - len(audio_frame)), mode='constant')
-			return audio_frame
+			return audio_frame.astype(numpy.float32)  # Ensure FP32 output
 	return None

@@ -14,7 +14,7 @@ import facefusion.jobs.job_manager
 import facefusion.jobs.job_store
 import facefusion.processors.core as processors
 from facefusion import config, content_analyser, face_classifier, face_detector, face_landmarker, face_masker, face_recognizer, inference_manager, logger, process_manager, state_manager, voice_extractor, wording
-from facefusion.audio import create_empty_audio_frame, get_voice_frame, read_static_voice, get_raw_audio_frame
+from facefusion.audio import create_empty_audio_frame, get_voice_frame, read_static_voice, get_raw_audio_frame, create_empty_raw_audio_frame
 from facefusion.common_helper import get_first
 from facefusion.download import conditional_download_hashes, conditional_download_sources, resolve_download_url
 from facefusion.face_analyser import get_many_faces, get_one_face
@@ -195,8 +195,11 @@ def get_audio_encoder():
                 available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
                 available_gb = available_memory / 1024**3
                 if available_gb > 4.0:
+                    # Ensure model is in FP32 before moving to GPU
                     audio_encoder.model = audio_encoder.model.float().cuda()
                     print("🔄 Moved audio encoder to GPU with float32 precision")
+                else:
+                    print(f"⚠️ Insufficient GPU memory ({available_gb:.1f}GB) for audio encoder, keeping on CPU")
             except Exception as move_error:
                 print(f"⚠️ Audio encoder GPU move failed: {move_error}")
     return audio_encoder
@@ -1258,9 +1261,8 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 		if model_name == 'latentsync':
 			source_audio_frame = get_raw_audio_frame(source_audio_path, temp_video_fps, frame_number)
 			if source_audio_frame is None or not numpy.any(source_audio_frame):
-				# Create empty raw audio frame (16kHz for Whisper)
-				frame_duration_samples = int(16000 / temp_video_fps)
-				source_audio_frame = numpy.zeros(frame_duration_samples, dtype=numpy.float32)
+				# Create empty raw audio frame with consistent FP32 format
+				source_audio_frame = create_empty_raw_audio_frame(temp_video_fps, sample_rate=16000)
 		else:
 			source_audio_frame = get_voice_frame(source_audio_path, temp_video_fps, frame_number)
 			if not numpy.any(source_audio_frame):
@@ -1283,8 +1285,8 @@ def process_image(source_paths : List[str], target_path : str, output_path : str
 	
 	# Create appropriate empty audio frame based on model
 	if model_name == 'latentsync':
-		# Create empty raw audio frame (1 second at 16kHz for Whisper)
-		source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)
+		# Create empty raw audio frame with consistent FP32 format (1 second at 16kHz)
+		source_audio_frame = create_empty_raw_audio_frame(fps=1.0, sample_rate=16000)  # 1 FPS = 1 second
 	else:
 		source_audio_frame = create_empty_audio_frame()
 	
