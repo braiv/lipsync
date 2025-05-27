@@ -484,17 +484,26 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     
                     # 🧹 IMMEDIATELY offload audio encoder to CPU to save memory
                     if audio_encoder is not None and hasattr(audio_encoder, 'model'):
-                        audio_encoder.model = audio_encoder.model.cpu()
-                        print("🔄 Moved audio encoder to CPU")
-                    torch.cuda.empty_cache()
-                    
-                    # Apply classifier-free guidance for audio only if needed
-                    if do_classifier_free_guidance:
-                        null_audio_embeds = torch.zeros_like(audio_tensor)
-                        audio_tensor = torch.cat([null_audio_embeds, audio_tensor])
-                        print(f"🔍 CFG Audio tensor shape: {audio_tensor.shape}")
-                        del null_audio_embeds
+                        # 🔧 IMMEDIATELY MOVE ENCODER BACK TO CPU
+                        if torch.cuda.is_available() and hasattr(audio_encoder, 'model'):
+                            try:
+                                # Synchronize before moving to avoid CUDA errors
+                                torch.cuda.synchronize()
+                                audio_encoder.model = audio_encoder.model.cpu()
+                                torch.cuda.synchronize()  # Ensure move is complete
+                                print("🔄 Moved audio encoder back to CPU")
+                            except RuntimeError as move_error:
+                                print(f"⚠️ Warning: Could not move audio encoder to CPU: {move_error}")
+                                # Continue anyway, the encoder will stay on GPU
                         torch.cuda.empty_cache()
+                        
+                        # Apply classifier-free guidance for audio only if needed
+                        if do_classifier_free_guidance:
+                            null_audio_embeds = torch.zeros_like(audio_tensor)
+                            audio_tensor = torch.cat([null_audio_embeds, audio_tensor])
+                            print(f"🔍 CFG Audio tensor shape: {audio_tensor.shape}")
+                            del null_audio_embeds
+                            torch.cuda.empty_cache()
                                          
                     # 🏗️ STEP 2: Prepare video with immediate VAE cleanup
                     video_latent = prepare_latentsync_frame(close_vision_frame)
@@ -807,8 +816,15 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 
                 # 🔧 IMMEDIATELY MOVE ENCODER BACK TO CPU
                 if torch.cuda.is_available() and hasattr(encoder, 'model'):
-                    encoder.model = encoder.model.cpu()
-                    print("🔄 Moved audio encoder back to CPU")
+                    try:
+                        # Synchronize before moving to avoid CUDA errors
+                        torch.cuda.synchronize()
+                        encoder.model = encoder.model.cpu()
+                        torch.cuda.synchronize()  # Ensure move is complete
+                        print("🔄 Moved audio encoder back to CPU")
+                    except RuntimeError as move_error:
+                        print(f"⚠️ Warning: Could not move audio encoder to CPU: {move_error}")
+                        # Continue anyway, the encoder will stay on GPU
                 torch.cuda.empty_cache()
                 
                 print(f"🔍 Audio2feat returned shape: {audio_feat.shape}")
@@ -927,17 +943,44 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
             # Following train_unet.py and lipsync_pipeline.py VAE scaling
             print(f"🔍 About to encode tensor shape: {tensor.shape}")
             
-            # 🔧 Ensure VAE and input are on same device
+            # 🔧 Ensure VAE and input are on same device with proper error handling
             vae_model = get_vae()
-            target_device = vae_model.device
-            tensor = tensor.to(target_device)
-            print(f"🔧 Moved input tensor to {target_device} to match VAE device")
             
-            encode_result = vae_model.encode(tensor)
-            print(f"🔍 Encode result type: {type(encode_result)}")
-            print(f"🔍 Encode result latent_dist: {encode_result.latent_dist}")
+            # Move VAE to GPU if available, with error handling
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    vae_model = vae_model.float().cuda()
+                    torch.cuda.synchronize()
+                    print(f"🔧 VAE moved to GPU successfully")
+                else:
+                    vae_model = vae_model.float().cpu()
+                    print(f"🔧 VAE on CPU")
+                
+                target_device = vae_model.device
+                tensor = tensor.to(target_device, dtype=torch.float32)
+                print(f"🔧 Moved input tensor to {target_device} to match VAE device")
+                
+                encode_result = vae_model.encode(tensor)
+                print(f"🔍 Encode result type: {type(encode_result)}")
+                print(f"🔍 Encode result latent_dist: {encode_result.latent_dist}")
+                
+                latent = encode_result.latent_dist.sample()
+                
+            except RuntimeError as vae_error:
+                print(f"❌ VAE encoding failed: {vae_error}")
+                # Try CPU fallback
+                print("🔄 Trying VAE encoding on CPU as fallback...")
+                try:
+                    torch.cuda.synchronize()
+                    vae_model = vae_model.cpu()
+                    tensor = tensor.cpu()
+                    encode_result = vae_model.encode(tensor)
+                    latent = encode_result.latent_dist.sample()
+                    print("✅ CPU fallback successful")
+                except Exception as cpu_error:
+                    raise RuntimeError(f"VAE encoding failed on both GPU and CPU: GPU={vae_error}, CPU={cpu_error}")
             
-            latent = encode_result.latent_dist.sample()
             print(f"🔍 Latent after sampling: {latent}")
             print(f"🔍 Latent type: {type(latent)}")
             print(f"🔍 Latent shape: {latent.shape if latent is not None else 'None'}")
@@ -1008,36 +1051,70 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
             # 🔧 CRITICAL: Move VAE back to GPU only when needed
             vae_model = get_vae()  # This will load it if needed
             
-            # Ensure VAE is on GPU for decode
-            if vae_model.device.type != 'cuda':
-                vae_model = vae_model.float().cuda()
-                print("🔄 Moved VAE to GPU for decode with float32 precision")
-            
-            # Move latent to same device as VAE with float32 precision
-            latent = latent.to(vae_model.device, dtype=torch.float32)
-            
-            # Apply VAE scaling
-            vae_config = vae_model.config
-            shift_factor = getattr(vae_config, 'shift_factor', 0.0) or 0.0
-            scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215) or 0.18215
-            
-            latents = latent / scaling_factor + shift_factor
-            
-            # Reshape for VAE decode
-            from einops import rearrange
-            latents = rearrange(latents, "b c f h w -> (b f) c h w")  # (1, 4, 1, 64, 64) → (1, 4, 64, 64)
-            
-            print(f"🔍 About to VAE decode shape: {latents.shape}")
-            
-            # VAE decode
-            decoded_latents = vae_model.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
+            # Ensure VAE is on GPU for decode with proper error handling
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    if vae_model.device.type != 'cuda':
+                        vae_model = vae_model.float().cuda()
+                        print("🔄 Moved VAE to GPU for decode with float32 precision")
+                    torch.cuda.synchronize()
+                
+                # Move latent to same device as VAE with float32 precision
+                latent = latent.to(vae_model.device, dtype=torch.float32)
+                
+                # Apply VAE scaling
+                vae_config = vae_model.config
+                shift_factor = getattr(vae_config, 'shift_factor', 0.0) or 0.0
+                scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215) or 0.18215
+                
+                latents = latent / scaling_factor + shift_factor
+                
+                # Reshape for VAE decode
+                from einops import rearrange
+                latents = rearrange(latents, "b c f h w -> (b f) c h w")  # (1, 4, 1, 64, 64) → (1, 4, 64, 64)
+                
+                print(f"🔍 About to VAE decode shape: {latents.shape}")
+                
+                # VAE decode
+                decoded_latents = vae_model.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
+                
+            except RuntimeError as decode_error:
+                print(f"❌ VAE decode failed on GPU: {decode_error}")
+                # Try CPU fallback
+                print("🔄 Trying VAE decode on CPU as fallback...")
+                try:
+                    torch.cuda.synchronize()
+                    vae_model = vae_model.cpu()
+                    latent = latent.cpu()
+                    
+                    # Apply VAE scaling
+                    vae_config = vae_model.config
+                    shift_factor = getattr(vae_config, 'shift_factor', 0.0) or 0.0
+                    scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215) or 0.18215
+                    
+                    latents = latent / scaling_factor + shift_factor
+                    
+                    # Reshape for VAE decode
+                    from einops import rearrange
+                    latents = rearrange(latents, "b c f h w -> (b f) c h w")
+                    
+                    decoded_latents = vae_model.decode(latents).sample
+                    print("✅ CPU fallback decode successful")
+                except Exception as cpu_decode_error:
+                    raise RuntimeError(f"VAE decode failed on both GPU and CPU: GPU={decode_error}, CPU={cpu_decode_error}")
             
             # 🔧 IMMEDIATELY move VAE back to CPU to free GPU memory
-            vae_model = vae_model.cpu()
-            vae = vae_model  # Update global reference
-            print("🔄 Moved VAE back to CPU")
+            try:
+                torch.cuda.synchronize()
+                vae_model = vae_model.cpu()
+                vae = vae_model  # Update global reference
+                torch.cuda.synchronize()
+                print("🔄 Moved VAE back to CPU")
+            except RuntimeError as cleanup_error:
+                print(f"⚠️ Warning: Could not move VAE to CPU: {cleanup_error}")
             torch.cuda.empty_cache()
-            
+
             print(f"🔍 VAE decode output shape: {decoded_latents.shape}")
             
             # Handle unexpected channel count
@@ -1067,6 +1144,7 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
             image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
             
             print(f"🔍 Final image shape: {image_bgr.shape}")
+            
             return image_bgr
 
     except Exception as e:
