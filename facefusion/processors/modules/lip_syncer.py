@@ -389,12 +389,58 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
 
 
 def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> VisionFrame:
-    lip_syncer = get_inference_pool().get('lip_syncer')  # ONNX Runtime session
+    lip_syncer = None  # Initialize to None
     model_name = state_manager.get_item('lip_syncer_model')
     
     print(f"🔍 Forward function called with model: {model_name}")
     print(f"🔍 Input close_vision_frame shape: {close_vision_frame.shape}")
     print(f"🔍 Input close_vision_frame dtype: {close_vision_frame.dtype}")
+
+    # 🧹 AGGRESSIVE GPU MEMORY CLEANUP before loading ONNX model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+        # Force cleanup of our models to make room for ONNX
+        global audio_encoder, vae
+        try:
+            if audio_encoder is not None and hasattr(audio_encoder, 'model'):
+                audio_encoder.model = audio_encoder.model.cpu()
+            if vae is not None:
+                vae = vae.cpu()
+            torch.cuda.empty_cache()
+            
+            # Check available memory before ONNX loading
+            available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            available_gb = available_memory / 1024**3
+            print(f"💾 Available GPU memory before ONNX load: {available_gb:.1f} GB")
+            
+            if available_gb < 3.0:  # Need at least 3GB for LatentSync ONNX model
+                print("⚠️ Low GPU memory detected! Forcing aggressive cleanup...")
+                # Force garbage collection
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                
+                # Try to free more memory
+                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                available_gb = available_memory / 1024**3
+                print(f"💾 Available GPU memory after cleanup: {available_gb:.1f} GB")
+                
+                if available_gb < 2.0:
+                    raise RuntimeError(f"Insufficient GPU memory: {available_gb:.1f} GB available, need at least 2GB for LatentSync")
+        except Exception as cleanup_error:
+            print(f"⚠️ Memory cleanup warning: {cleanup_error}")
+
+    try:
+        lip_syncer = get_inference_pool().get('lip_syncer')  # ONNX Runtime session
+    except Exception as onnx_error:
+        print(f"❌ Failed to load ONNX model: {onnx_error}")
+        if "Failed to allocate memory" in str(onnx_error):
+            print("💡 Suggestion: Clear GPU memory and restart the application")
+            print("💡 Run: sudo kill <other_python_processes> or restart")
+        raise
 
     with conditional_thread_semaphore():
         if model_name == 'latentsync':
