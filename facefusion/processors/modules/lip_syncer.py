@@ -6,12 +6,15 @@ import cv2
 import numpy
 import torch
 import torch.nn.functional as F
+import librosa
+import scipy.signal
+import soundfile as sf
 
 import facefusion.jobs.job_manager
 import facefusion.jobs.job_store
 import facefusion.processors.core as processors
 from facefusion import config, content_analyser, face_classifier, face_detector, face_landmarker, face_masker, face_recognizer, inference_manager, logger, process_manager, state_manager, voice_extractor, wording
-from facefusion.audio import create_empty_audio_frame, get_voice_frame, read_static_voice
+from facefusion.audio import create_empty_audio_frame, get_voice_frame, read_static_voice, get_raw_audio_frame
 from facefusion.common_helper import get_first
 from facefusion.download import conditional_download_hashes, conditional_download_sources, resolve_download_url
 from facefusion.face_analyser import get_many_faces, get_one_face
@@ -28,13 +31,87 @@ from facefusion.typing import ApplyStateItem, Args, AudioFrame, DownloadScope, F
 from facefusion.vision import read_image, read_static_image, restrict_video_fps, write_image
 
 from diffusers.models import AutoencoderKL
+from diffusers import DDIMScheduler
 
+# Import Audio2Feature from the LatentSync package
+from latentsync.whisper.audio2feature import Audio2Feature
 
-# Load VAE (Stable Diffusion 1.5 compatible)
-vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to("cuda").half().eval()
+# 🧹 MEMORY OPTIMIZATION: Lazy model loading to prevent OOM
+# Only load models when needed, not at import time
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Linear projection layer: projects from 4 → 384
-projection_weight = torch.randn(384, 4).half().to("cuda" if torch.cuda.is_available() else "cpu")  # or load if saved
+# Global model variables (loaded lazily)
+audio_encoder = None
+vae = None
+projection_weight = None
+
+def get_audio_encoder():
+    """Lazy loading of Whisper audio encoder"""
+    global audio_encoder
+    if audio_encoder is None:
+        print("🎵 Loading Whisper Tiny encoder...")
+        if torch.cuda.is_available():
+            available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            available_gb = available_memory / 1024**3
+            print(f"💾 Available memory before audio encoder: {available_gb:.1f} GB")
+            
+            # Optimized for T4 16GB - only use CPU if very low memory
+            if available_gb < 1.0:
+                print("⚠️ Very low memory! Loading audio encoder on CPU.")
+                audio_device = "cpu"
+            else:
+                audio_device = device
+        else:
+            audio_device = device
+            
+        audio_encoder = Audio2Feature(model_path="/home/cody_braiv_co/latent-sync/checkpoints/whisper/tiny.pt", device=audio_device)
+        print("✅ Audio encoder loaded.")
+    return audio_encoder
+
+def get_vae():
+    """Lazy loading of VAE model"""
+    global vae
+    if vae is None:
+        print("🖼️ Loading VAE model...")
+        if torch.cuda.is_available():
+            available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            available_gb = available_memory / 1024**3
+            print(f"💾 Available memory before VAE: {available_gb:.1f} GB")
+            
+            # Optimized for T4 16GB - only use CPU if very low memory
+            if available_gb < 2.0:
+                print("⚠️ Low memory! Loading VAE on CPU.")
+                vae_device = "cpu"
+            else:
+                vae_device = "cuda"
+        else:
+            vae_device = "cpu"
+            
+        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(vae_device).half().eval()
+        print("✅ VAE loaded.")
+    return vae
+
+def get_projection_weight():
+    """Lazy loading of projection weight"""
+    global projection_weight
+    if projection_weight is None:
+        projection_weight = torch.randn(384, 4).half().to("cuda" if torch.cuda.is_available() else "cpu")
+    return projection_weight
+
+def clear_models():
+    """Clear all models from memory"""
+    global audio_encoder, vae, projection_weight
+    if audio_encoder is not None:
+        del audio_encoder
+        audio_encoder = None
+    if vae is not None:
+        del vae
+        vae = None
+    if projection_weight is not None:
+        del projection_weight
+        projection_weight = None
+    torch.cuda.empty_cache()
+    print("🧹 All LatentSync models cleared from memory.")
 
 @lru_cache(maxsize = None)
 def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
@@ -98,7 +175,7 @@ def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
 					'path': resolve_relative_path('../.assets/models/latentsync_model_files/latentsync_unet.onnx')
 				}
 			},
-			'size': (256, 256)
+			'size': (512, 512)
 		}
 	}
 
@@ -164,11 +241,18 @@ def post_process() -> None:
 		face_masker.clear_inference_pool()
 		face_recognizer.clear_inference_pool()
 		voice_extractor.clear_inference_pool()
+		# 🧹 Clear LatentSync models from memory
+		clear_models()
 
 
 def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame: VisionFrame) -> VisionFrame:
     model_size = get_model_options().get('size')
-    temp_audio_frame = prepare_audio_frame(temp_audio_frame)
+    model_name = state_manager.get_item('lip_syncer_model')
+    
+    # Only prepare audio frame for non-latentsync models
+    if model_name != 'latentsync':
+        temp_audio_frame = prepare_audio_frame(temp_audio_frame)
+    
     crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), 'ffhq_512', (512, 512))
     face_landmark_68 = cv2.transform(target_face.landmark_set.get('68').reshape(1, -1, 2), affine_matrix).reshape(-1, 2)
     bounding_box = create_bounding_box(face_landmark_68)
@@ -208,7 +292,7 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         return temp_vision_frame
 
     # Add expected shape check
-    expected_shape = (256, 256, 3)  # BGR image
+    expected_shape = (512, 512, 3)  # BGR image
     if close_vision_frame.shape != expected_shape:
         print(f"⚠️ Unexpected frame shape: got {close_vision_frame.shape}, expected {expected_shape}")
         return temp_vision_frame
@@ -230,24 +314,164 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
         if model_name == 'latentsync':
             try:
                 with torch.no_grad():
-                    # Prepare audio input → (1, 13, 8, 32, 32)
-                    audio_tensor = prepare_latentsync_audio(temp_audio_frame)
+                    # 🧹 Initial memory cleanup
+                    torch.cuda.empty_cache()
+                    
+                    # 💾 Check available memory and adjust settings
+                    if torch.cuda.is_available():
+                        available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                        available_gb = available_memory / 1024**3
+                        print(f"💾 Available GPU memory: {available_gb:.1f} GB")
+                        
+                        # 🔥 MEMORY OPTIMIZATION: Optimized thresholds for different VRAM sizes
+                        if available_gb < 3.0:
+                            print("⚠️ Low memory detected! Disabling CFG to prevent OOM.")
+                            guidance_scale = 1.0  # Disable CFG
+                            num_inference_steps = 10  # Reduce steps
+                        elif available_gb < 6.0:
+                            print("💡 Medium memory detected. Using standard CFG.")
+                            guidance_scale = 1.5  # Standard CFG
+                            num_inference_steps = 15  # Slightly reduced steps
+                        else:
+                            print("🚀 High memory detected! Using optimal settings.")
+                            guidance_scale = 1.5  # Full CFG
+                            num_inference_steps = 20  # Full quality
+                    else:
+                        guidance_scale = 1.5
+                        num_inference_steps = 20
+                    
+                    do_classifier_free_guidance = guidance_scale > 1.0
+                    
+                    # Prepare audio input -> (1, N, 384) where N depends on audio length
+                    # LatentSync uses 16kHz audio for Whisper, not 48kHz
+                    audio_tensor = prepare_latentsync_audio(temp_audio_frame, sample_rate=16000)
+                    
+                    # Apply classifier-free guidance for audio
+                    if do_classifier_free_guidance:
+                        # Create unconditional audio embeddings (zeros)
+                        null_audio_embeds = torch.zeros_like(audio_tensor)
+                        # Concatenate with conditional embeddings
+                        audio_tensor = torch.cat([null_audio_embeds, audio_tensor])
+                                         
+                    # Prepare video input -> (1, 4, 64, 64)
+                    video_latent = prepare_latentsync_frame(close_vision_frame)
 
-                    # Prepare video latent → (1, 4, 32, 32)
-                    vision_latent = prepare_latentsync_frame(close_vision_frame)
-
-                    # Reorders the dimension from (1, 4, 32, 32) to (1, 32, 32, 4). Then, flattens (32 x 32 = 1024) it to (1, 1024, 4)
-                    encoder_hidden_states = vision_latent.permute(0, 2, 3, 1).reshape(1, -1, 4)  # (1, 1024, 4)
-                    encoder_hidden_states = torch.nn.functional.linear(encoder_hidden_states, projection_weight)  # Project to 384-dim (1, 1024, 384)
-                    encoder_hidden_states = encoder_hidden_states.cpu().numpy().astype(numpy.float16)
-
-                    # Run inference using ONNX model
-                    output_latent = lip_syncer.run(None, {
-                        'sample': audio_tensor.cpu().numpy().astype(numpy.float16),
-                        'timesteps': numpy.array([0], dtype=numpy.float16),
-                        'encoder_hidden_states': encoder_hidden_states
-                    })[0]
-
+                    # 1. Create initial noise latents for diffusion
+                    # Shape: (1, 4, 1, 64, 64) for single frame
+                    noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float16, device=device)
+                    
+                    # 2. Create proper mask for mouth region (binary mask)
+                    mask_height, mask_width = 64, 64
+                    mouth_mask = torch.zeros((mask_height, mask_width), dtype=torch.float16, device=device)
+                    # Create mouth region (lower center part of face)
+                    mouth_y_start = int(mask_height * 0.6)  # Lower 40% of face
+                    mouth_y_end = int(mask_height * 0.9)
+                    mouth_x_start = int(mask_width * 0.3)   # Center 40% width
+                    mouth_x_end = int(mask_width * 0.7)
+                    mouth_mask[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end] = 1.0
+                    
+                    # Shape: (1, 1, 1, 64, 64) - single channel mask
+                    mask_latents = mouth_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                    
+                    # Duplicate masks for classifier-free guidance if needed
+                    if do_classifier_free_guidance:
+                        mask_latents = torch.cat([mask_latents] * 2)
+                    
+                    # 3. Create masked image latents
+                    # Apply mask to video latents (mask out mouth region)
+                    masked_image_latents = video_latent * (1 - mask_latents[:1, 0:1])  # Use first mask, expand to 4 channels
+                    masked_image_latents = masked_image_latents.unsqueeze(2)  # Add temporal dimension
+                    
+                    # Duplicate masked image latents for classifier-free guidance if needed
+                    if do_classifier_free_guidance:
+                        masked_image_latents = torch.cat([masked_image_latents] * 2)
+                    
+                    # Add temporal dimension to video_latent for reference
+                    ref_latents = video_latent.unsqueeze(2)
+                    
+                    # Duplicate reference latents for classifier-free guidance if needed
+                    if do_classifier_free_guidance:
+                        ref_latents = torch.cat([ref_latents] * 2)
+                    
+                    # 🧹 Clean up intermediate tensors
+                    del video_latent, mouth_mask
+                    torch.cuda.empty_cache()
+                    
+                    # 4. Setup proper DDIM scheduler (following lipsync_pipeline.py and inference.py)
+                    # Use actual DDIM scheduler instead of manual creation
+                    scheduler = DDIMScheduler(
+                        num_train_timesteps=1000,
+                        beta_start=0.00085,
+                        beta_end=0.012,
+                        beta_schedule="linear",
+                        clip_sample=False,
+                        set_alpha_to_one=False,
+                        steps_offset=1,
+                        prediction_type="epsilon"
+                    )
+                    
+                    # Set timesteps for inference (following lipsync_pipeline.py)
+                    scheduler.set_timesteps(num_inference_steps, device=device)
+                    timesteps = scheduler.timesteps
+                    
+                    # 5. Initialize latents with noise (following lipsync_pipeline.py: prepare_latents)
+                    # Scale initial noise by scheduler.init_noise_sigma (standard DDIM initialization)
+                    latents = noise * scheduler.init_noise_sigma
+                    del noise  # Clean up noise tensor
+                    
+                    # 6. Denoising loop (following lipsync_pipeline.py structure)
+                    for i, t in enumerate(timesteps):
+                        # 🧹 Memory cleanup every few iterations
+                        if i % 5 == 0:
+                            torch.cuda.empty_cache()
+                        
+                        # Expand latents for classifier-free guidance
+                        latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                        
+                        # Scale model input (following lipsync_pipeline.py: scheduler.scale_model_input)
+                        latent_model_input = scheduler.scale_model_input(latent_model_input, t)
+                        
+                        # Concatenate all inputs: [latents, mask, masked_image, ref]
+                        # Following train_unet.py line 350: torch.cat([noisy_gt_latents, masks, masked_latents, ref_latents], dim=1)
+                        concatenated_latents = torch.cat(
+                            [latent_model_input, mask_latents, masked_image_latents, ref_latents], 
+                            dim=1
+                        )
+                        
+                        # 🧹 Clean up intermediate tensor
+                        del latent_model_input
+                        
+                        # Run ONNX inference for this timestep
+                        noise_pred = lip_syncer.run(None, {
+                            'sample': concatenated_latents.cpu().numpy().astype(numpy.float16),
+                            'timesteps': numpy.array([t.cpu().numpy()], dtype=numpy.int64),
+                            'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float16)
+                        })[0]
+                        
+                        # 🧹 Clean up concatenated tensor immediately
+                        del concatenated_latents
+                        
+                        # Convert back to torch tensor
+                        noise_pred = torch.from_numpy(noise_pred).to(device)
+                        
+                        # Perform guidance if needed (following lipsync_pipeline.py line 450-452)
+                        if do_classifier_free_guidance:
+                            noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                            # Clean up intermediate tensors
+                            del noise_pred_uncond, noise_pred_cond
+                        
+                        # DDIM update using scheduler.step() (following lipsync_pipeline.py)
+                        latents = scheduler.step(noise_pred, t, latents).prev_sample
+                        
+                        # 🧹 Clean up noise prediction
+                        del noise_pred
+                    
+                    # Final output is the denoised latents
+                    output_latent = latents
+                    
+                    # 🧹 Clean up all intermediate tensors
+                    del latents, mask_latents, masked_image_latents, ref_latents, audio_tensor
                     torch.cuda.empty_cache()
 
                     if output_latent is None:
@@ -255,20 +479,34 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
 
                     # Convert numpy array to torch tensor if needed
                     if isinstance(output_latent, numpy.ndarray):
-                        output_latent = torch.from_numpy(output_latent).to(torch.float16).to("cuda" if torch.cuda.is_available() else "cpu")
+                        output_latent = torch.from_numpy(output_latent).to(torch.float16).to(device)
 
-                    # Convert Input: (1, 4, 8, 32, 32) to Output: (512, 512, 3) for downstream transpose
+                    # Convert Input: (1, 4, 1, 64, 64) to Output: (512, 512, 3) for downstream transpose
                     close_vision_frame = normalize_latentsync_frame(output_latent)
+                    
+                    # 🧹 Final cleanup
+                    del output_latent
+                    torch.cuda.empty_cache()
 
                     # After model inference
-                    print("🔍 Model output - min/max:", output_latent.min().item(), output_latent.max().item())
-                    print("🔍 Model output - mean:", output_latent.mean().item())
-                    print("🔍 Model output shape:", output_latent.shape)
+                    print("🔍 Model output shape:", close_vision_frame.shape if close_vision_frame is not None else "None")
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    logger.error(f"❌ OOM during LatentSync processing! Try reducing video resolution or disabling CFG.", __name__)
+                    # 🧹 Emergency cleanup
+                    torch.cuda.empty_cache()
+                    return close_vision_frame
+                else:
+                    logger.error(f"LatentSync processing failed: {str(e)}", __name__)
+                    return close_vision_frame
             except Exception as e:
                 logger.error(f"LatentSync processing failed: {str(e)}", __name__)
                 return close_vision_frame
             finally:
-                for var in ['audio_tensor', 'vision_latent', 'encoder_hidden_states', 'output_latent']:
+                # 🧹 Comprehensive cleanup
+                for var in ['audio_tensor', 'video_latent', 'noise_pred', 'output_latent', 'latents', 
+                           'mask_latents', 'masked_image_latents', 'ref_latents', 'concatenated_latents',
+                           'latent_model_input', 'noise', 'mouth_mask']:
                     if var in locals():
                         del locals()[var]
                 torch.cuda.empty_cache()
@@ -308,62 +546,132 @@ def normalize_close_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
     return crop_vision_frame
 
 
-# Prepare audio for LatentSync: log-mel normalization + reshape to (1, 13, 8, 32, 32)
-# Input: (1, 1, 80, 16) mel spectrogram → Output: (1, 13, 8, 32, 32)
-def prepare_latentsync_audio(temp_audio_frame: AudioFrame) -> torch.Tensor:
+def resample_audio(audio_waveform: numpy.ndarray, original_sample_rate: int, target_sample_rate: int) -> numpy.ndarray:
     """
-    Converts mel spectrogram (1, 1, 80, 16) → (1, 13, 8, 32, 32), float16
+    Resample audio waveform from original sample rate to target sample rate.
+    
+    :param audio_waveform: Input audio waveform as numpy array
+    :param original_sample_rate: Original sample rate of the audio
+    :param target_sample_rate: Target sample rate (e.g., 16000 for Whisper)
+    :return: Resampled audio waveform
     """
     try:
-        #print("🔹 Step 1 — Raw temp_audio_frame shape:", temp_audio_frame.shape)
-        frame = temp_audio_frame.squeeze()  # (80, 16)
-        #print("🔹 Step 2 — Squeezed shape:", frame.shape)
-
-        # Normalize like Whisper
-        # Shifts and scales to roughly [0, 2]
-        frame = numpy.maximum(frame, 1e-10)
-        frame = numpy.log10(frame)
-        frame = numpy.maximum(frame, frame.max() - 8.0)
-        frame = (frame + 4.0) / 4.0
-        frame = frame.astype(numpy.float32) # Normalise first in float32 for stability
-        #print("Step 3 — Normalized. Shape:", frame.shape) # (80, 16)
-
-        # Trim or pad time steps to 13
-        time_dim = frame.shape[1]
-        if time_dim < 13:
-            pad = 13 - time_dim
-            #print(f"ℹ️ Padding {pad} zeros")
-            frame = numpy.pad(frame, ((0, 0), (0, pad)), mode='constant')
-        elif time_dim > 13:
-            #print(f"ℹ️ Trimming from {time_dim} to 13 time steps")
-            frame = frame[:, :13]
-
-        #print("🔹 Step 4 — Trimmed/padded shape:", frame.shape)  # (80, 13)
-
-        blocks = []
-        for t in range(13):
-            slice_80 = frame[:, t]  # (80,)
+        if original_sample_rate == target_sample_rate:
+            return audio_waveform
+        
+        # Use librosa for high-quality resampling
+        resampled_audio = librosa.resample(
+            y=audio_waveform,
+            orig_sr=original_sample_rate,
+            target_sr=target_sample_rate,
+            res_type='kaiser_best'  # High-quality resampling
+        )
+        
+        return resampled_audio.astype(numpy.float32)
+        
+    except Exception as e:
+        # Fallback to scipy if librosa fails
+        try:
+            # Calculate the resampling ratio
+            ratio = target_sample_rate / original_sample_rate
+            num_samples = int(len(audio_waveform) * ratio)
             
-			# Create a 3D cube (8, 32, 32) from the first 8 values
-            cube = numpy.tile(slice_80[:8], (32, 32, 1)).transpose(2, 0, 1) # (8, 32, 32)
-            blocks.append(cube)
+            # Use scipy's resample function
+            resampled_audio = scipy.signal.resample(audio_waveform, num_samples)
+            return resampled_audio.astype(numpy.float32)
+            
+        except Exception as fallback_error:
+            print(f"⚠️ Resampling failed with both librosa and scipy: {e}, {fallback_error}")
+            print(f"⚠️ Returning original audio without resampling")
+            return audio_waveform.astype(numpy.float32)
 
-        reshaped = numpy.stack(blocks, axis=0)  # (13, 8, 32, 32)
-        #print("Step 5 — Created 3D blocks:", reshaped.shape)
 
-        final = reshaped[numpy.newaxis, ...]  # (1, 13, 8, 32, 32)
-        #print("✅ Final tensor shape:", final.shape)
-
-        tensor = torch.from_numpy(final).to(torch.float16)
-        return tensor.cuda() if torch.cuda.is_available() else tensor
-
+# Prepare audio for LatentSync: raw waveform → (1, N, 384)
+# Input: raw audio waveform → Output: (1, N, 384)
+def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int = 16000) -> torch.Tensor:
+    """
+    Convert a raw audio waveform into a torch.Tensor of Whisper encoder embeddings (LatentSync format).
+    The output tensor has shape [1, N, 384] (batch_size=1, sequence_length=N audio tokens, embedding_dim=384),
+    and uses torch.float16 dtype for compatibility with the LatentSync U-Net.
+    
+    :param raw_audio_waveform: NumPy array of audio samples (1D or 2D). 
+                     If 2D (multi-channel), it will be converted to mono.
+    :param sample_rate: Sample rate of the audio. LatentSync expects 16 kHz.
+    :return: A float16 torch.Tensor of shape [1, N, 384] containing Whisper Tiny encoder embeddings.
+    """
+    try:
+        import tempfile
+        import os
+        
+        # Ensure the audio is mono. If stereo or multi-channel, average the channels to get mono.
+        if raw_audio_waveform.ndim > 1:
+            raw_audio_waveform = numpy.mean(raw_audio_waveform, axis=0)
+        
+        # Convert waveform to float32 numpy array (Whisper expects float32 PCM in [-1.0, 1.0]).
+        raw_audio_waveform = raw_audio_waveform.astype(numpy.float32)
+        
+        # Normalize the audio to [-1, 1] range if it's not already. 
+        if numpy.max(numpy.abs(raw_audio_waveform)) > 1.0:
+            # If data looks like int16 PCM, scale accordingly
+            if raw_audio_waveform.dtype == numpy.int16 or numpy.max(numpy.abs(raw_audio_waveform)) > 32767:
+                raw_audio_waveform = raw_audio_waveform / 32768.0
+            else:
+                # General normalization (in case of float data that's not yet in [-1,1])
+                raw_audio_waveform = raw_audio_waveform / numpy.max(numpy.abs(raw_audio_waveform))
+        
+        # If sample rate is not 16000 Hz, resample the audio to 16000.
+        if sample_rate != 16000:
+            raw_audio_waveform = resample_audio(raw_audio_waveform, sample_rate, 16000)
+            sample_rate = 16000
+        
+        # Create a temporary audio file since Audio2Feature expects a file path
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            temp_audio_path = temp_file.name
+        
+        try:
+            # Write the audio waveform to temporary file
+            # Use librosa for better format support and compatibility
+            try:
+                # Try soundfile first (faster for WAV)
+                sf.write(temp_audio_path, raw_audio_waveform, sample_rate)
+            except Exception as sf_error:
+                # Fallback to librosa if soundfile fails
+                print(f"⚠️ soundfile failed, using librosa: {sf_error}")
+                # Use scipy.io.wavfile as another fallback
+                from scipy.io import wavfile
+                # Convert to int16 for wavfile
+                audio_int16 = (raw_audio_waveform * 32767).astype(numpy.int16)
+                wavfile.write(temp_audio_path, sample_rate, audio_int16)
+            
+            # Use Audio2Feature to extract features from the audio file
+            # This follows the same pattern as in lipsync_pipeline.py
+            audio_feat = get_audio_encoder().audio2feat(temp_audio_path)
+            
+            # audio_feat should be a tensor of shape (N, 384) where N is number of audio tokens
+            # Add batch dimension to make it (1, N, 384)
+            if audio_feat.ndim == 2:
+                audio_feat = audio_feat.unsqueeze(0)  # (N, 384) -> (1, N, 384)
+            
+            # Convert to float16 and move to the correct device
+            audio_feat = audio_feat.to(device, dtype=torch.float16)
+            
+            return audio_feat
+            
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_audio_path):
+                os.remove(temp_audio_path)
+    
     except Exception as e:
         raise RuntimeError(f"❌ Failed to prepare LatentSync audio: {str(e)}")
 
 
-# Input: (H, W, 3) BGR image (OpenCV), Output: torch.Tensor (1, 4, 32, 32)
-# Prepare video frame for LatentSync: Resize to 512x512, encode with VAE → (1, 4, 64, 64), then interpolate to → (1, 4, 32, 32)
+# Input: (H, W, 3) BGR image (OpenCV), Output: torch.Tensor (1, 4, 64, 64)
 def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
+    """
+    Converts a single BGR image (OpenCV format) to VAE latent representation
+    for LatentSync. Output shape: (1, 4, 64, 64)
+    """
     if vision_frame is None:
         raise ValueError("❌ vision_frame is None.")
     if not isinstance(vision_frame, numpy.ndarray):
@@ -371,10 +679,8 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
     if vision_frame.size == 0:
         raise ValueError("❌ vision_frame is empty.")
 
-    #print("🖼️ Raw vision_frame shape:", vision_frame.shape)
-
     try:
-		# 🛡️ Ensure valid OpenCV input: uint8 in [0, 255]
+        # 🛡️ Ensure valid OpenCV input: uint8 in [0, 255]
         if vision_frame.dtype != numpy.uint8:
             print(f"⚠️ Warning: vision_frame dtype is {vision_frame.dtype}, converting to uint8.")
             vision_frame = numpy.clip(vision_frame, 0, 255).astype(numpy.uint8)
@@ -382,11 +688,7 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         # ✅ Convert from BGR (OpenCV default) to RGB
         frame_rgb = cv2.cvtColor(vision_frame, cv2.COLOR_BGR2RGB)
 
-        # After BGR to RGB conversion
-        print("🔍 After BGR2RGB - min/max:", frame_rgb.min(), frame_rgb.max())
-        print("🔍 After BGR2RGB - mean:", frame_rgb.mean())
-
-        # ✅ Resize to 512x512
+        # ✅ Resize to 512x512 (standard for VAE encoding)
         resized = cv2.resize(frame_rgb, (512, 512))
         print("✅ Resized frame to 512x512")
 
@@ -395,10 +697,6 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         normalized = (normalized * 2.0) - 1.0
         normalized = normalized.astype(numpy.float16)
 
-        # After normalization
-        print("🔍 After normalization - min/max:", normalized.min(), normalized.max())
-        print("🔍 After normalization - mean:", normalized.mean())
-
         # ✅ Change shape to (1, 3, 512, 512)
         tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
@@ -406,67 +704,87 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         tensor = tensor.to(device).to(torch.float16)
 
-        # ✅ Encode with VAE
+        # ✅ Encode with VAE to get latent representation
         with torch.no_grad():
-            latent = vae.encode(tensor).latent_dist.sample().to(torch.float16) * 0.18215 # → (1, 4, 64, 64)
-            latent = F.interpolate(latent, size = (32, 32), mode='bilinear', align_corners=False) # Ensure final output is (1, 4, 32, 32)
+            # Following train_unet.py and lipsync_pipeline.py VAE scaling
+            latent = get_vae().encode(tensor).latent_dist.sample()
+            # Correct scaling: (latents - shift_factor) * scaling_factor
+            latent = (latent - get_vae().config.shift_factor) * get_vae().config.scaling_factor
+            latent = latent.to(torch.float16)
+            
+            print("🔍 VAE latent shape:", latent.shape)
             print("🔍 VAE latent - min/max:", latent.min().item(), latent.max().item())
             print("🔍 VAE latent - mean:", latent.mean().item())
 
-        return latent # this will be encoder_hidden_states (after reshape)
+        return latent  # Shape: (1, 4, 64, 64)
 
     except Exception as e:
         raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
 
 
-# Convert LatentSync UNet output latent back to displayable image (256x256x3 RGB)
-# # Input: (1, 4, 8, 32, 32) → Output: (256, 256, 3) for downstream transpose
+# Convert LatentSync UNet output latent back to displayable image (512x512x3 RGB)
+# Input: (1, 4, 1, 64, 64) → Output: (512, 512, 3) BGR for OpenCV
 def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
     if not isinstance(latent, torch.Tensor):
         raise TypeError("Input must be a torch tensor")
     
     try:
+        # Handle different input shapes - following lipsync_pipeline.py decode_latents
         if latent.ndim == 5:
-            # ✅ Reduce temporal dim: (1, 4, 8, 32, 32) → (1, 4, 32, 32)
-            latent = latent[:, :, 4, :, :]
+            # Input: (1, 4, 1, 64, 64) - keep as is for rearrange
+            pass
+        elif latent.ndim == 4:
+            # Input: (1, 4, 64, 64) - add temporal dimension
+            latent = latent.unsqueeze(2)  # → (1, 4, 1, 64, 64)
+        else:
+            raise ValueError(f"Unexpected latent shape: {latent.shape}")
 
         with torch.no_grad():
+            print("🔍 Before VAE decode - latent shape:", latent.shape)
             print("🔍 Before VAE decode - latent min/max:", latent.min().item(), latent.max().item())
-            print("🔍 Before VAE decode - latent mean:", latent.mean().item())
 
             latent = latent.to(torch.float16).to("cuda" if torch.cuda.is_available() else "cpu")
-
-            # Interpolate to 32x32 if needed just to be safe (Optional)
-            if latent.shape[-1] != 32:
-                latent = F.interpolate(latent, size=(32, 32), mode='bilinear', align_corners=False)
-            latent = latent.clamp(-1, 1)
             
-            # Decode from vae (already float16 compatible)
-            decoded = vae.decode(latent / 0.18215).sample  # → (1, 3, 256, 256)
+            # Following lipsync_pipeline.py decode_latents method exactly:
+            # Step 1: Apply VAE scaling (line 142)
+            latents = latent / get_vae().config.scaling_factor + get_vae().config.shift_factor
+            
+            # Step 2: Reshape for VAE decode (line 143)
+            from einops import rearrange
+            latents = rearrange(latents, "b c f h w -> (b f) c h w")  # (1, 4, 1, 64, 64) → (1, 4, 64, 64)
+            
+            # Step 3: VAE decode (line 144)
+            decoded_latents = get_vae().decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
 
-            del latent
-
+            del latent, latents
             torch.cuda.empty_cache()
 
-            print("🔍 After VAE decode - raw min/max:", decoded.min().item(), decoded.max().item())
-            print("🔍 After VAE decode - raw mean:", decoded.mean().item())
+            print("🔍 After VAE decode - raw shape:", decoded_latents.shape)
+            print("🔍 After VAE decode - raw min/max:", decoded_latents.min().item(), decoded_latents.max().item())
 
-            # Convert to uint8 image (0–255)
-            decoded = (decoded.clamp(-1, 1) + 1) / 2.0
-            decoded = decoded[0].permute(1, 2, 0).cpu().numpy() * 255  # → (256, 256, 3)
-            decoded = decoded.astype(numpy.uint8)
+            # Following lipsync_pipeline.py pixel_values_to_images method (line 254-257):
+            # Step 1: Rearrange dimensions
+            pixel_values = rearrange(decoded_latents, "f c h w -> f h w c")  # (1, 3, 512, 512) → (1, 512, 512, 3)
             
-            # Skipping warpAffine if image is empty
-            if decoded.shape[0] == 0 or decoded.shape[1] == 0:
-                raise RuntimeError("❌ Decoded image is empty. Skipping warpAffine.")
+            # Step 2: Normalize to [0, 1]
+            pixel_values = (pixel_values / 2 + 0.5).clamp(0, 1)
+            
+            # Step 3: Convert to uint8
+            images = (pixel_values * 255).to(torch.uint8)
+            
+            # Step 4: Convert to numpy and remove batch dimension
+            image = images[0].cpu().numpy()  # (512, 512, 3)
+            
+            print("🔍 After normalization - shape:", image.shape)
+            print("🔍 After normalization - min/max:", image.min(), image.max())
+            
+            # Convert RGB → BGR for OpenCV compatibility
+            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-            # 🔁 Convert RGB → BGR for OpenCV
-            decoded = cv2.cvtColor(decoded, cv2.COLOR_RGB2BGR)
+            print("🧪 Final normalized frame shape:", image_bgr.shape)
+            print("🧪 Final normalized frame - dtype:", image_bgr.dtype)
 
-            print("🧪 Final normalized close frame - min/max per channel:", decoded[..., 0].min(), decoded[..., 1].min(), decoded[..., 2].min())
-            print("🧪 Channel means:", decoded[..., 0].mean(), decoded[..., 1].mean(), decoded[..., 2].mean())
-
-        return decoded
+        return image_bgr  # (512, 512, 3) BGR uint8
 
     except Exception as e:
         raise RuntimeError(f"❌ Failed to normalize frame: {str(e)}")
@@ -502,13 +820,24 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 	reference_faces = get_reference_faces() if 'reference' in state_manager.get_item('face_selector_mode') else None
 	source_audio_path = get_first(filter_audio_paths(source_paths))
 	temp_video_fps = restrict_video_fps(state_manager.get_item('target_path'), state_manager.get_item('output_video_fps'))
+	model_name = state_manager.get_item('lip_syncer_model')
 
 	for queue_payload in process_manager.manage(queue_payloads):
 		frame_number = queue_payload.get('frame_number')
 		target_vision_path = queue_payload.get('frame_path')
-		source_audio_frame = get_voice_frame(source_audio_path, temp_video_fps, frame_number)
-		if not numpy.any(source_audio_frame):
-			source_audio_frame = create_empty_audio_frame()
+		
+		# Get appropriate audio frame based on model
+		if model_name == 'latentsync':
+			source_audio_frame = get_raw_audio_frame(source_audio_path, temp_video_fps, frame_number)
+			if source_audio_frame is None or not numpy.any(source_audio_frame):
+				# Create empty raw audio frame (16kHz for Whisper)
+				frame_duration_samples = int(16000 / temp_video_fps)
+				source_audio_frame = numpy.zeros(frame_duration_samples, dtype=numpy.float32)
+		else:
+			source_audio_frame = get_voice_frame(source_audio_path, temp_video_fps, frame_number)
+			if not numpy.any(source_audio_frame):
+				source_audio_frame = create_empty_audio_frame()
+		
 		target_vision_frame = read_image(target_vision_path)
 		output_vision_frame = process_frame(
 		{
@@ -522,7 +851,15 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 
 def process_image(source_paths : List[str], target_path : str, output_path : str) -> None:
 	reference_faces = get_reference_faces() if 'reference' in state_manager.get_item('face_selector_mode') else None
-	source_audio_frame = create_empty_audio_frame()
+	model_name = state_manager.get_item('lip_syncer_model')
+	
+	# Create appropriate empty audio frame based on model
+	if model_name == 'latentsync':
+		# Create empty raw audio frame (1 second at 16kHz for Whisper)
+		source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)
+	else:
+		source_audio_frame = create_empty_audio_frame()
+	
 	target_vision_frame = read_static_image(target_path)
 	output_vision_frame = process_frame(
 	{
