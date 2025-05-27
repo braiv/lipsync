@@ -245,7 +245,7 @@ def get_projection_weight():
     """Lazy loading of projection weight"""
     global projection_weight
     if projection_weight is None:
-        projection_weight = torch.randn(384, 4).half().to("cuda" if torch.cuda.is_available() else "cpu")
+        projection_weight = torch.randn(384, 4).float().to("cuda" if torch.cuda.is_available() else "cpu")  # FP32
     return projection_weight
 
 def clear_models():
@@ -685,7 +685,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         })[0]
                         
                         del concatenated_latents  # Immediate cleanup
-                        noise_pred = torch.from_numpy(noise_pred).to("cpu")  # Keep on CPU
+                        noise_pred = torch.from_numpy(noise_pred).to("cpu", dtype=torch.float32)  # Explicit FP32
                         
                         if do_classifier_free_guidance:
                             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
@@ -942,7 +942,12 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 # Convert to float32 and move to the correct device
                 audio_feat = audio_feat.to("cpu", dtype=torch.float32)
                 
-                print(f"🔍 Returning audio tensor shape: {audio_feat.shape}")
+                # Ensure no mixed precision - force FP32 throughout
+                if audio_feat.dtype != torch.float32:
+                    print(f"🔧 Converting audio features from {audio_feat.dtype} to float32")
+                    audio_feat = audio_feat.float()
+                
+                print(f"🔍 Returning audio tensor shape: {audio_feat.shape}, dtype: {audio_feat.dtype}")
                 return audio_feat
                 
             except Exception as audio_feat_error:
@@ -957,6 +962,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 estimated_tokens = max(10, int(audio_duration_seconds * 50))  # ~50 tokens per second
                 print(f"🔧 Creating fallback audio tensor with {estimated_tokens} tokens for {audio_duration_seconds:.2f}s audio")
                 fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float32, device="cpu")
+                print(f"🔧 Fallback tensor shape: {fallback_tensor.shape}, dtype: {fallback_tensor.dtype}")
                 return fallback_tensor
             
         finally:
@@ -979,7 +985,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             estimated_tokens = 25  # Default fallback
             
         fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float32, device="cpu")
-        print(f"🔧 Fallback tensor shape: {fallback_tensor.shape}")
+        print(f"🔧 Fallback tensor shape: {fallback_tensor.shape}, dtype: {fallback_tensor.dtype}")
         return fallback_tensor
 
 
@@ -1016,20 +1022,20 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         # ✅ Change shape to (1, 3, 512, 512)
         tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
-        # Move tensor to target device (VAE device)
+        # Move tensor to target device (VAE device) and ensure FP32
         target_device = "cpu"  # Force CPU to prevent CUDA memory corruption
         
-        tensor = tensor.to(target_device)
-        print(f"🔧 Input tensor moved to {target_device} (forced CPU mode)")
+        tensor = tensor.to(target_device, dtype=torch.float32)  # Explicit FP32
+        print(f"🔧 Input tensor moved to {target_device} with dtype: {tensor.dtype}")
 
         # ✅ Encode with VAE to get latent representation
         vae_instance = get_vae()
         
-        # Force VAE to stay on CPU to prevent CUDA memory corruption
-        vae_instance = vae_instance.cpu()
+        # Force VAE to stay on CPU to prevent CUDA memory corruption and ensure FP32
+        vae_instance = vae_instance.cpu().float()  # Explicit FP32
         target_device = "cpu"
-        tensor = tensor.to("cpu")
-        print("🔧 VAE forced to CPU to prevent CUDA memory corruption")
+        tensor = tensor.to("cpu", dtype=torch.float32)  # Explicit FP32
+        print(f"🔧 VAE forced to CPU with FP32 precision")
         
         with torch.no_grad():
             try:
@@ -1079,9 +1085,10 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         
         # Correct scaling: (latents - shift_factor) * scaling_factor
         latent = (latent - shift_factor) * scaling_factor
-        latent = latent.to(torch.float32)
+        latent = latent.to(torch.float32)  # Ensure FP32 precision
         
         print("🔍 VAE latent shape:", latent.shape)
+        print("🔍 VAE latent dtype:", latent.dtype)
         print("🔍 VAE latent - min/max:", latent.min().item(), latent.max().item())
         print("🔍 VAE latent - mean:", latent.mean().item())
 
@@ -1136,6 +1143,7 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
             scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215) or 0.18215
             
             latents = latent / scaling_factor + shift_factor
+            latents = latents.to(torch.float32)  # Ensure FP32 precision
             
             # Reshape for VAE decode
             from einops import rearrange
@@ -1152,8 +1160,8 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
                 # Fallback to CPU if GPU fails
                 if vae_instance.device.type == 'cuda':
                     print("🔄 Falling back to CPU for VAE decode")
-                    vae_instance = vae_instance.cpu()
-                    latents = latents.cpu()
+                    vae_instance = vae_instance.cpu().float()  # Ensure FP32
+                    latents = latents.cpu().to(torch.float32)  # Ensure FP32
                     decoded_latents = vae_instance.decode(latents).sample
                     print("✅ VAE decode completed on CPU (fallback)")
                 else:

@@ -42,8 +42,8 @@ print("✅ Config loaded.")
 
 # 🧠 Initialize the model from config
 print("🧠 Initializing model...")
-model = UNet3DConditionModel(**config.model).to(device).half()
-print("✅ Model initialized in float16.")
+model = UNet3DConditionModel(**config.model).to(device).float()  # FP32 for stability
+print("✅ Model initialized in float32 for better stability.")
 
 if torch.cuda.is_available():
     model_memory = torch.cuda.memory_allocated() / 1024**3
@@ -186,10 +186,10 @@ if not SKIP_VERIFICATION:
     
     try:
         # Create smaller test inputs for verification
-        test_sample = torch.randn(1, 13, 1, 64, 64).half()
+        test_sample = torch.randn(1, 13, 1, 64, 64).float()  # FP32
         test_timesteps = torch.tensor([10], dtype=torch.int64)
         # 🚀 T4 16GB: Use same audio length as export for thorough verification
-        test_audio = torch.randn(1, 75, 384).half()  # Match export audio_seq_len
+        test_audio = torch.randn(1, 75, 384).float()  # FP32 for consistency
         
         # Safe ONNX session options
         so = ort.SessionOptions()
@@ -205,9 +205,9 @@ if not SKIP_VERIFICATION:
         outputs = ort_session.run(
             None,
             {
-                "sample": test_sample.cpu().numpy().astype(numpy.float16),
+                "sample": test_sample.cpu().numpy().astype(numpy.float32),
                 "timesteps": test_timesteps.cpu().numpy().astype(numpy.int64),
-                "encoder_hidden_states": test_audio.cpu().numpy().astype(numpy.float16)
+                "encoder_hidden_states": test_audio.cpu().numpy().astype(numpy.float32)
             }
         )
 
@@ -242,7 +242,7 @@ print(f"   - Input: ({export_batch_size}, 13, 1, 64, 64) - single frame processi
 print(f"   - Audio: ({export_batch_size}, {audio_seq_len}, 384) - optimized for T4 16GB")
 print(f"   - Output: ({export_batch_size}, 4, 1, 64, 64) - VAE latent space")
 print(f"   - Dynamic axes enabled for runtime CFG support (1→2 batch scaling)")
-print(f"   - FP16 precision for optimal T4 Tensor Core performance")
+print(f"   - FP32 precision for maximum stability and compatibility")
 print(f"   - Memory optimizations: constant folding, lazy loading, aggressive cleanup")
 print(f"   - Expected runtime memory: ~7GB peak (excellent for T4 16GB)")
 
