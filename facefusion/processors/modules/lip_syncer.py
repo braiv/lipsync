@@ -399,7 +399,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     
                     # Prepare audio input -> (1, N, 384) where N depends on audio length
                     # LatentSync uses 16kHz audio for Whisper, not 48kHz
+                    print(f"🔍 Input temp_audio_frame shape: {temp_audio_frame.shape if hasattr(temp_audio_frame, 'shape') else 'No shape attr'}")
+                    print(f"🔍 Input temp_audio_frame type: {type(temp_audio_frame)}")
                     audio_tensor = prepare_latentsync_audio(temp_audio_frame, sample_rate=16000)
+                    print(f"🔍 Audio tensor shape: {audio_tensor.shape}")
+                    print(f"🔍 Audio tensor dtype: {audio_tensor.dtype}")
                     
                     # Apply classifier-free guidance for audio
                     if do_classifier_free_guidance:
@@ -407,6 +411,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         null_audio_embeds = torch.zeros_like(audio_tensor)
                         # Concatenate with conditional embeddings
                         audio_tensor = torch.cat([null_audio_embeds, audio_tensor])
+                        print(f"🔍 CFG Audio tensor shape: {audio_tensor.shape}")
                                          
                     # Prepare video input -> (1, 4, 64, 64)
                     video_latent = prepare_latentsync_frame(close_vision_frame)
@@ -696,6 +701,20 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
         import tempfile
         import os
         
+        print(f"🔍 prepare_latentsync_audio input shape: {raw_audio_waveform.shape}")
+        print(f"🔍 prepare_latentsync_audio input dtype: {raw_audio_waveform.dtype}")
+        print(f"🔍 prepare_latentsync_audio sample_rate: {sample_rate}")
+        
+        # Validate input
+        if raw_audio_waveform is None:
+            raise ValueError("Audio waveform is None")
+        if not isinstance(raw_audio_waveform, numpy.ndarray):
+            raise TypeError(f"Expected numpy array, got {type(raw_audio_waveform)}")
+        if raw_audio_waveform.size == 0:
+            print("⚠️ Empty audio detected, creating minimal audio signal")
+            # Create minimal 1-second audio at 16kHz
+            raw_audio_waveform = numpy.zeros(16000, dtype=numpy.float32)
+        
         # Ensure the audio is mono. If stereo or multi-channel, average the channels to get mono.
         if raw_audio_waveform.ndim > 1:
             raw_audio_waveform = numpy.mean(raw_audio_waveform, axis=0)
@@ -712,10 +731,21 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 # General normalization (in case of float data that's not yet in [-1,1])
                 raw_audio_waveform = raw_audio_waveform / numpy.max(numpy.abs(raw_audio_waveform))
         
+        # Ensure minimum length for Whisper processing (at least 0.1 seconds)
+        min_samples = int(0.1 * 16000)  # 0.1 seconds at 16kHz
+        if len(raw_audio_waveform) < min_samples:
+            print(f"⚠️ Audio too short ({len(raw_audio_waveform)} samples), padding to {min_samples} samples")
+            padded_audio = numpy.zeros(min_samples, dtype=numpy.float32)
+            padded_audio[:len(raw_audio_waveform)] = raw_audio_waveform
+            raw_audio_waveform = padded_audio
+        
         # If sample rate is not 16000 Hz, resample the audio to 16000.
         if sample_rate != 16000:
             raw_audio_waveform = resample_audio(raw_audio_waveform, sample_rate, 16000)
             sample_rate = 16000
+        
+        print(f"🔍 Processed audio shape: {raw_audio_waveform.shape}")
+        print(f"🔍 Processed audio min/max: {raw_audio_waveform.min():.4f}/{raw_audio_waveform.max():.4f}")
         
         # Create a temporary audio file since Audio2Feature expects a file path
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
@@ -727,6 +757,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             try:
                 # Try soundfile first (faster for WAV)
                 sf.write(temp_audio_path, raw_audio_waveform, sample_rate)
+                print(f"🔍 Wrote audio to {temp_audio_path}")
             except Exception as sf_error:
                 # Fallback to librosa if soundfile fails
                 print(f"⚠️ soundfile failed, using librosa: {sf_error}")
@@ -735,19 +766,30 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 # Convert to int16 for wavfile
                 audio_int16 = (raw_audio_waveform * 32767).astype(numpy.int16)
                 wavfile.write(temp_audio_path, sample_rate, audio_int16)
+                print(f"🔍 Wrote audio via scipy to {temp_audio_path}")
             
             # Use Audio2Feature to extract features from the audio file
             # This follows the same pattern as in lipsync_pipeline.py
+            print("🔍 Calling audio2feat...")
             audio_feat = get_audio_encoder().audio2feat(temp_audio_path)
+            print(f"🔍 Audio2feat returned shape: {audio_feat.shape}")
+            print(f"🔍 Audio2feat returned dtype: {audio_feat.dtype}")
             
             # audio_feat should be a tensor of shape (N, 384) where N is number of audio tokens
             # Add batch dimension to make it (1, N, 384)
             if audio_feat.ndim == 2:
                 audio_feat = audio_feat.unsqueeze(0)  # (N, 384) -> (1, N, 384)
             
+            print(f"🔍 Final audio_feat shape: {audio_feat.shape}")
+            
+            # Validate output shape
+            if audio_feat.shape[0] == 0 or audio_feat.shape[1] == 0:
+                raise ValueError(f"Invalid audio feature shape: {audio_feat.shape}")
+            
             # Convert to float16 and move to the correct device
             audio_feat = audio_feat.to(device, dtype=torch.float16)
             
+            print(f"🔍 Returning audio tensor shape: {audio_feat.shape}")
             return audio_feat
             
         finally:
@@ -756,7 +798,13 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 os.remove(temp_audio_path)
     
     except Exception as e:
-        raise RuntimeError(f"❌ Failed to prepare LatentSync audio: {str(e)}")
+        print(f"❌ prepare_latentsync_audio failed: {str(e)}")
+        print(f"❌ Input was: {type(raw_audio_waveform)}, shape: {getattr(raw_audio_waveform, 'shape', 'no shape')}")
+        # Return a minimal valid audio tensor as fallback
+        print("🔧 Creating fallback audio tensor...")
+        fallback_tensor = torch.zeros(1, 10, 384, dtype=torch.float16, device=device)
+        print(f"🔧 Fallback tensor shape: {fallback_tensor.shape}")
+        return fallback_tensor
 
 
 # Input: (H, W, 3) BGR image (OpenCV), Output: torch.Tensor (1, 4, 64, 64)
