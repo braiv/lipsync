@@ -134,27 +134,20 @@ def get_audio_encoder():
             raise RuntimeError("LatentSync is not available. Cannot load audio encoder.")
             
         print("🎵 Loading Whisper Tiny encoder...")
-        if torch.cuda.is_available():
-            available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-            available_gb = available_memory / 1024**3
-            print(f"💾 Available memory before audio encoder: {available_gb:.1f} GB")
-            
-            # Always load on CPU first to avoid dtype issues
-            audio_device = "cpu"
-        else:
-            audio_device = "cpu"
+        # Force CPU to prevent CUDA memory corruption
+        audio_device = "cpu"
             
         try:
             # Use built-in Whisper 'tiny' model instead of checkpoint file
             audio_encoder = Audio2Feature(model_path="tiny", device=audio_device)
             
-            # 🔧 CRITICAL: Ensure audio encoder uses float32 precision
+            # 🔧 CRITICAL: Ensure audio encoder uses float32 precision and stays on CPU
             if hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
-                # Force float32 precision to avoid dtype mismatch
-                audio_encoder.model = audio_encoder.model.float()
-                print("🔧 Set audio encoder to float32 precision")
+                # Force float32 precision and CPU to avoid dtype/device mismatch
+                audio_encoder.model = audio_encoder.model.float().cpu()
+                print("🔧 Set audio encoder to float32 precision on CPU")
             
-            print("✅ Audio encoder loaded.")
+            print("✅ Audio encoder loaded on CPU.")
             
             # Test the encoder with a small sample to ensure it works
             print("🧪 Testing audio encoder...")
@@ -180,11 +173,10 @@ def get_audio_encoder():
             print(f"❌ Failed to load audio encoder: {load_error}")
             raise RuntimeError(f"Could not initialize Audio2Feature: {load_error}")
     else:
-        # Ensure audio encoder is on the correct device and precision
-        if torch.cuda.is_available() and hasattr(audio_encoder, 'model') and audio_encoder.model.device.type != 'cuda':
-            # Move to GPU with consistent float32 precision
-            audio_encoder.model = audio_encoder.model.float().cuda()
-            print("🔄 Moved audio encoder to GPU with float32 precision")
+        # Ensure audio encoder stays on CPU
+        if hasattr(audio_encoder, 'model') and audio_encoder.model.device.type != 'cpu':
+            audio_encoder.model = audio_encoder.model.float().cpu()
+            print("🔄 Moved audio encoder back to CPU")
     return audio_encoder
 
 def get_vae():
@@ -192,24 +184,17 @@ def get_vae():
     global vae
     if vae is None:
         print("🖼️ Loading VAE model...")
-        if torch.cuda.is_available():
-            available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-            available_gb = available_memory / 1024**3
-            print(f"💾 Available memory before VAE: {available_gb:.1f} GB")
+        # Force CPU to prevent CUDA memory corruption
+        vae_device = "cpu"
             
-            # Load on CPU first to avoid dtype issues
-            vae_device = "cpu"
-        else:
-            vae_device = "cpu"
-            
-        # 🔧 Use float32 instead of half precision to avoid dtype mismatches
+        # 🔧 Use float32 and force CPU to avoid dtype/device mismatches
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(vae_device).float().eval()
-        print("✅ VAE loaded with float32 precision.")
+        print("✅ VAE loaded with float32 precision on CPU.")
     else:
-        # Ensure VAE is on the correct device with consistent precision
-        if torch.cuda.is_available() and vae.device.type != 'cuda':
-            vae = vae.float().cuda()
-            print("🔄 Moved VAE to GPU with float32 precision")
+        # Ensure VAE stays on CPU
+        if vae.device.type != 'cpu':
+            vae = vae.float().cpu()
+            print("🔄 Moved VAE back to CPU")
     return vae
 
 def get_projection_weight():
@@ -587,11 +572,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     torch.cuda.empty_cache()
                     
                     # 🏗️ STEP 3: Setup minimal diffusion (ultra-conservative)
-                    noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float32, device=device)
+                    noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float32, device="cpu")
                     
                     # Simple mouth mask (no complex masking to save memory)
                     mask_height, mask_width = 64, 64
-                    mouth_mask = torch.zeros((mask_height, mask_width), dtype=torch.float32, device=device)
+                    mouth_mask = torch.zeros((mask_height, mask_width), dtype=torch.float32, device="cpu")
                     mouth_y_start, mouth_y_end = int(mask_height * 0.6), int(mask_height * 0.9)
                     mouth_x_start, mouth_x_end = int(mask_width * 0.3), int(mask_width * 0.7)
                     mouth_mask[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end] = 1.0
@@ -628,7 +613,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         prediction_type="epsilon"
                     )
                     
-                    scheduler.set_timesteps(num_inference_steps, device=device)
+                    scheduler.set_timesteps(num_inference_steps, device="cpu")
                     timesteps = scheduler.timesteps
                     latents = noise * scheduler.init_noise_sigma
                     del noise
@@ -648,15 +633,15 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         
                         del latent_model_input  # Immediate cleanup
                         
-                        # ONNX inference
+                        # ONNX inference with proper float16 conversion
                         noise_pred = lip_syncer.run(None, {
-                            'sample': concatenated_latents.cpu().numpy().astype(numpy.float32),
+                            'sample': concatenated_latents.cpu().numpy().astype(numpy.float16),  # Convert to float16
                             'timesteps': numpy.array([t.cpu().numpy()], dtype=numpy.int64),
-                            'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float32)
+                            'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float16)  # Convert to float16
                         })[0]
                         
                         del concatenated_latents  # Immediate cleanup
-                        noise_pred = torch.from_numpy(noise_pred).to(device)
+                        noise_pred = torch.from_numpy(noise_pred).to("cpu")  # Keep on CPU
                         
                         if do_classifier_free_guidance:
                             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
@@ -988,37 +973,19 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
         # Move tensor to target device (VAE device)
-        target_device = "cpu"  # Start with CPU-first approach
-        if torch.cuda.is_available():
-            # Try to use GPU if memory allows
-            try:
-                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-                available_gb = available_memory / 1024**3
-                if available_gb > 5.0:  # Only use GPU if sufficient memory
-                    target_device = "cuda:0"
-                    print(f"✅ Using GPU for VAE with {available_gb:.1f}GB available")
-                else:
-                    print(f"⚠️ Using CPU for VAE - only {available_gb:.1f}GB GPU memory available")
-            except Exception as gpu_check_error:
-                print(f"⚠️ GPU check failed, using CPU: {gpu_check_error}")
+        target_device = "cpu"  # Force CPU to prevent CUDA memory corruption
         
         tensor = tensor.to(target_device)
-        print(f"🔧 Input tensor moved to {target_device}")
+        print(f"🔧 Input tensor moved to {target_device} (forced CPU mode)")
 
         # ✅ Encode with VAE to get latent representation
         vae_instance = get_vae()
         
-        # Ensure VAE is on the same device as input tensor
-        try:
-            vae_instance = vae_instance.to(target_device, dtype=torch.float32)
-            torch.cuda.synchronize() if target_device.startswith("cuda") else None
-            print(f"🔧 VAE moved to {target_device} to match input tensor")
-        except Exception as vae_move_error:
-            print(f"⚠️ VAE move failed: {vae_move_error}, trying CPU fallback")
-            target_device = "cpu"
-            tensor = tensor.to("cpu")
-            vae_instance = vae_instance.cpu()
-            print("🔄 Fallback: Both VAE and tensor moved to CPU")
+        # Force VAE to stay on CPU to prevent CUDA memory corruption
+        vae_instance = vae_instance.cpu()
+        target_device = "cpu"
+        tensor = tensor.to("cpu")
+        print("🔧 VAE forced to CPU to prevent CUDA memory corruption")
         
         with torch.no_grad():
             try:
@@ -1112,104 +1079,54 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
                 raise ValueError(f"Not enough channels: expected 4, got {latent.shape[1]}")
 
         with torch.no_grad():
-            # 🔧 CRITICAL: Move VAE back to GPU only when needed
+            # 🔧 CRITICAL: Force VAE to CPU to prevent memory corruption
             vae_instance = get_vae()  # This will load it if needed
             
-            # Ensure VAE is on GPU for decode with proper error handling
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                    if vae_instance.device.type != 'cuda':
-                        vae_instance = vae_instance.float().cuda()
-                        print("🔄 Moved VAE to GPU for decode with float32 precision")
-                    torch.cuda.synchronize()
-                
-                # Move latent to same device as VAE with float32 precision
-                latent = latent.to(vae_instance.device, dtype=torch.float32)
-                
-                # Apply VAE scaling
-                vae_config = vae_instance.config
-                shift_factor = getattr(vae_config, 'shift_factor', 0.0) or 0.0
-                scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215) or 0.18215
-                
-                latents = latent / scaling_factor + shift_factor
-                
-                # Reshape for VAE decode
-                from einops import rearrange
-                latents = rearrange(latents, "b c f h w -> (b f) c h w")  # (1, 4, 1, 64, 64) → (1, 4, 64, 64)
-                
-                print(f"🔍 About to VAE decode shape: {latents.shape}")
-                
-                # VAE decode
-                decoded_latents = vae_instance.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
-                
-            except RuntimeError as decode_error:
-                print(f"❌ VAE decode failed on GPU: {decode_error}")
-                # Try CPU fallback
-                print("🔄 Trying VAE decode on CPU as fallback...")
-                try:
-                    torch.cuda.synchronize()
-                    vae_instance = vae_instance.cpu()
-                    latent = latent.cpu()
-                    
-                    # Apply VAE scaling
-                    vae_config = vae_instance.config
-                    shift_factor = getattr(vae_config, 'shift_factor', 0.0) or 0.0
-                    scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215) or 0.18215
-                    
-                    latents = latent / scaling_factor + shift_factor
-                    
-                    # Reshape for VAE decode
-                    from einops import rearrange
-                    latents = rearrange(latents, "b c f h w -> (b f) c h w")
-                    
-                    decoded_latents = vae_instance.decode(latents).sample
-                    print("✅ CPU fallback decode successful")
-                except Exception as cpu_decode_error:
-                    raise RuntimeError(f"VAE decode failed on both GPU and CPU: GPU={decode_error}, CPU={cpu_decode_error}")
+            # Force CPU processing to prevent CUDA memory corruption
+            vae_instance = vae_instance.cpu()
+            latent = latent.to("cpu", dtype=torch.float32)
+            print("🔧 VAE decode forced to CPU to prevent CUDA memory corruption")
             
-            # 🔧 IMMEDIATELY move VAE back to CPU to free GPU memory
-            try:
-                torch.cuda.synchronize()
-                vae_instance = vae_instance.cpu()
-                vae = vae_instance  # Update global reference
-                torch.cuda.synchronize()
-                print("🔄 Moved VAE back to CPU")
-            except RuntimeError as cleanup_error:
-                print(f"⚠️ Warning: Could not move VAE to CPU: {cleanup_error}")
-            torch.cuda.empty_cache()
+            # Apply VAE scaling
+            vae_config = vae_instance.config
+            shift_factor = getattr(vae_config, 'shift_factor', 0.0) or 0.0
+            scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215) or 0.18215
+            
+            latents = latent / scaling_factor + shift_factor
+            
+            # Reshape for VAE decode
+            from einops import rearrange
+            latents = rearrange(latents, "b c f h w -> (b f) c h w")  # (1, 4, 1, 64, 64) → (1, 4, 64, 64)
+            
+            print(f"🔍 About to VAE decode shape: {latents.shape}")
+            
+            # VAE decode on CPU
+            decoded_latents = vae_instance.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
+            print("✅ VAE decode completed on CPU")
 
-            print(f"🔍 VAE decode output shape: {decoded_latents.shape}")
-            
-            # Handle unexpected channel count
-            if decoded_latents.shape[1] == 6:
-                print("⚠️ VAE returned 6 channels, extracting first 3 (RGB)")
+        # Handle unexpected channel count
+        if decoded_latents.shape[1] == 6:
+            print("⚠️ VAE returned 6 channels, extracting first 3 (RGB)")
+            decoded_latents = decoded_latents[:, :3, :, :]
+        elif decoded_latents.shape[1] != 3:
+            print(f"⚠️ Unexpected channel count: {decoded_latents.shape[1]}, expected 3")
+            if decoded_latents.shape[1] > 3:
                 decoded_latents = decoded_latents[:, :3, :, :]
-            elif decoded_latents.shape[1] != 3:
-                print(f"⚠️ Unexpected channel count: {decoded_latents.shape[1]}, expected 3")
-                if decoded_latents.shape[1] > 3:
-                    decoded_latents = decoded_latents[:, :3, :, :]
-                else:
-                    raise ValueError(f"Not enough channels: got {decoded_latents.shape[1]}, need 3")
+            else:
+                raise ValueError(f"Not enough channels: got {decoded_latents.shape[1]}, need 3")
 
-            del latent, latents
-            torch.cuda.empty_cache()
-
-            # Convert to image format
-            pixel_values = rearrange(decoded_latents, "f c h w -> f h w c")  # (1, 3, 512, 512) → (1, 512, 512, 3)
-            pixel_values = (pixel_values / 2 + 0.5).clamp(0, 1)
-            images = (pixel_values * 255).to(torch.uint8)
-            image = images[0].cpu().numpy()  # (512, 512, 3)
-            
-            del decoded_latents, pixel_values, images
-            torch.cuda.empty_cache()
-            
-            # Convert RGB → BGR for OpenCV
-            image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            
-            print(f"🔍 Final image shape: {image_bgr.shape}")
-            
-            return image_bgr
+        # Convert to image format
+        pixel_values = rearrange(decoded_latents, "f c h w -> f h w c")  # (1, 3, 512, 512) → (1, 512, 512, 3)
+        pixel_values = (pixel_values / 2 + 0.5).clamp(0, 1)
+        images = (pixel_values * 255).to(torch.uint8)
+        image = images[0].cpu().numpy()  # (512, 512, 3)
+        
+        # Convert RGB → BGR for OpenCV
+        image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        
+        print(f"🔍 Final image shape: {image_bgr.shape}")
+        
+        return image_bgr
 
     except Exception as e:
         # Emergency cleanup
