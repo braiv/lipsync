@@ -33,8 +33,14 @@ from facefusion.vision import read_image, read_static_image, restrict_video_fps,
 from diffusers.models import AutoencoderKL
 from diffusers import DDIMScheduler
 
-# Import Audio2Feature from the LatentSync package
-from latentsync.whisper.audio2feature import Audio2Feature
+# Import Audio2Feature from the LatentSync package (optional)
+try:
+    from latentsync.whisper.audio2feature import Audio2Feature
+    LATENTSYNC_AVAILABLE = True
+except ImportError:
+    print("⚠️ LatentSync not available. LatentSync model will be disabled.")
+    Audio2Feature = None
+    LATENTSYNC_AVAILABLE = False
 
 # 🧹 MEMORY OPTIMIZATION: Lazy model loading to prevent OOM
 # Only load models when needed, not at import time
@@ -49,6 +55,9 @@ def get_audio_encoder():
     """Lazy loading of Whisper audio encoder"""
     global audio_encoder
     if audio_encoder is None:
+        if not LATENTSYNC_AVAILABLE:
+            raise RuntimeError("LatentSync is not available. Cannot load audio encoder.")
+            
         print("🎵 Loading Whisper Tiny encoder...")
         if torch.cuda.is_available():
             available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
@@ -64,7 +73,7 @@ def get_audio_encoder():
         else:
             audio_device = device
             
-        audio_encoder = Audio2Feature(model_path="/home/cody_braiv_co/latent-sync/checkpoints/whisper/tiny.pt", device=audio_device)
+        audio_encoder = Audio2Feature(model_path="checkpoints/whisper/tiny.pt", device=audio_device)
         print("✅ Audio encoder loaded.")
     return audio_encoder
 
@@ -312,6 +321,10 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
 
     with conditional_thread_semaphore():
         if model_name == 'latentsync':
+            if not LATENTSYNC_AVAILABLE:
+                logger.error("LatentSync model selected but LatentSync is not available!", __name__)
+                return close_vision_frame
+                
             try:
                 with torch.no_grad():
                     # 🧹 Initial memory cleanup
