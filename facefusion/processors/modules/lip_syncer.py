@@ -780,8 +780,14 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         with torch.no_grad():
             # Following train_unet.py and lipsync_pipeline.py VAE scaling
             latent = get_vae().encode(tensor).latent_dist.sample()
+            
+            # Handle missing VAE config attributes with defaults
+            vae_config = get_vae().config
+            shift_factor = getattr(vae_config, 'shift_factor', 0.0)
+            scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215)
+            
             # Correct scaling: (latents - shift_factor) * scaling_factor
-            latent = (latent - get_vae().config.shift_factor) * get_vae().config.scaling_factor
+            latent = (latent - shift_factor) * scaling_factor
             latent = latent.to(torch.float16)
             
             print("🔍 VAE latent shape:", latent.shape)
@@ -833,7 +839,11 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             
             # Following lipsync_pipeline.py decode_latents method exactly:
             # Step 1: Apply VAE scaling (line 142)
-            latents = latent / get_vae().config.scaling_factor + get_vae().config.shift_factor
+            vae_config = get_vae().config
+            shift_factor = getattr(vae_config, 'shift_factor', 0.0)
+            scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215)
+            
+            latents = latent / scaling_factor + shift_factor
             
             # Step 2: Reshape for VAE decode (line 143)
             from einops import rearrange
