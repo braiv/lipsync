@@ -300,7 +300,10 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
     close_vision_frame, close_matrix = warp_face_by_bounding_box(crop_vision_frame, bounding_box, model_size)
     close_vision_frame = prepare_crop_frame(close_vision_frame)
     close_vision_frame = forward(temp_audio_frame, close_vision_frame)
-    # close_vision_frame = normalize_close_frame(close_vision_frame)    
+    
+    # --- Process model output based on model type ---
+    if model_name != 'latentsync':
+        close_vision_frame = normalize_close_frame(close_vision_frame)
 
     # --- Check if the model returned a valid frame ---
     if close_vision_frame is None:
@@ -319,10 +322,15 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         print("⚠️ Empty frame detected:", close_vision_frame.shape)
         return temp_vision_frame
 
-    # Add expected shape check
-    expected_shape = (512, 512, 3)  # BGR image
+    # Different expected shapes based on model
+    if model_name == 'latentsync':
+        expected_shape = (512, 512, 3)  # LatentSync outputs BGR image directly
+    else:
+        expected_shape = (96, 96, 3)   # Wav2Lip models output 96x96
+    
     if close_vision_frame.shape != expected_shape:
         print(f"⚠️ Unexpected frame shape: got {close_vision_frame.shape}, expected {expected_shape}")
+        print(f"🔍 Model: {model_name}, Frame dtype: {close_vision_frame.dtype}")
         return temp_vision_frame
 
     # --- Apply mask and paste lips back ---
@@ -480,6 +488,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                             'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float16)
                         })[0]
                         
+                        # 🔍 Debug ONNX output shape
+                        if i == 0:  # Only print on first iteration
+                            print(f"🔍 ONNX noise_pred shape: {noise_pred.shape}")
+                            print(f"🔍 ONNX noise_pred dtype: {noise_pred.dtype}")
+                        
                         # 🧹 Clean up concatenated tensor immediately
                         del concatenated_latents
                         
@@ -501,6 +514,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     
                     # Final output is the denoised latents
                     output_latent = latents
+                    
+                    # 🔍 Debug final output shape
+                    print(f"🔍 Final output_latent shape: {output_latent.shape}")
+                    print(f"🔍 Final output_latent dtype: {output_latent.dtype}")
+                    print(f"🔍 Final output_latent min/max: {output_latent.min().item():.4f}/{output_latent.max().item():.4f}")
                     
                     # 🧹 Clean up all intermediate tensors
                     del latents, mask_latents, masked_image_latents, ref_latents, audio_tensor
@@ -761,6 +779,9 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
         raise TypeError("Input must be a torch tensor")
     
     try:
+        print(f"🔍 normalize_latentsync_frame input shape: {latent.shape}")
+        print(f"🔍 normalize_latentsync_frame input dtype: {latent.dtype}")
+        
         # Handle different input shapes - following lipsync_pipeline.py decode_latents
         if latent.ndim == 5:
             # Input: (1, 4, 1, 64, 64) - keep as is for rearrange
@@ -768,8 +789,19 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
         elif latent.ndim == 4:
             # Input: (1, 4, 64, 64) - add temporal dimension
             latent = latent.unsqueeze(2)  # → (1, 4, 1, 64, 64)
+        elif latent.ndim == 3:
+            # Input: (4, 64, 64) - add batch and temporal dimensions
+            latent = latent.unsqueeze(0).unsqueeze(2)  # → (1, 4, 1, 64, 64)
         else:
             raise ValueError(f"Unexpected latent shape: {latent.shape}")
+        
+        # Check if we have the expected number of channels (4 for VAE latents)
+        if latent.shape[1] != 4:
+            print(f"⚠️ Warning: Expected 4 channels, got {latent.shape[1]}. Attempting to extract first 4 channels.")
+            if latent.shape[1] >= 4:
+                latent = latent[:, :4, ...]  # Take first 4 channels
+            else:
+                raise ValueError(f"Not enough channels: expected 4, got {latent.shape[1]}")
 
         with torch.no_grad():
             print("🔍 Before VAE decode - latent shape:", latent.shape)
