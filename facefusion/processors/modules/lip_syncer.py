@@ -92,7 +92,8 @@ def get_audio_encoder():
         else:
             audio_device = device
             
-        audio_encoder = Audio2Feature(model_path="checkpoints/whisper/tiny.pt", device=audio_device)
+        # Use built-in Whisper 'tiny' model instead of checkpoint file
+        audio_encoder = Audio2Feature(model_path="tiny", device=audio_device)
         print("✅ Audio encoder loaded.")
     return audio_encoder
 
