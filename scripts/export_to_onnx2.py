@@ -72,10 +72,10 @@ export_batch_size = 1  # Reduces memory by 50%
 # 🚀 T4 16GB OPTIMIZATION: Increased from 50 to 75 for better quality
 audio_seq_len = 75     # Increased for T4 16GB - better audio coverage
 
-# ✅ Memory-optimized input shapes
-sample_input = torch.randn(export_batch_size, 13, 1, 64, 64).to(device).half()
+# ✅ Memory-optimized input shapes - FP32 for better compatibility
+sample_input = torch.randn(export_batch_size, 13, 1, 64, 64).to(device).float()  # FP32
 timesteps = torch.tensor([10], dtype=torch.int64).to(device)
-encoder_hidden_states = torch.randn(export_batch_size, audio_seq_len, 384).to(device).half()
+encoder_hidden_states = torch.randn(export_batch_size, audio_seq_len, 384).to(device).float()  # FP32
 
 print("✅ Dummy input created with MEMORY-OPTIMIZED dimensions:")
 print(f"   sample_input: {sample_input.shape}")

@@ -134,20 +134,36 @@ def get_audio_encoder():
             raise RuntimeError("LatentSync is not available. Cannot load audio encoder.")
             
         print("🎵 Loading Whisper Tiny encoder...")
-        # Force CPU to prevent CUDA memory corruption
-        audio_device = "cpu"
+        # Conservative GPU usage with FP32 for stability
+        if torch.cuda.is_available():
+            try:
+                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                available_gb = available_memory / 1024**3
+                print(f"💾 Available memory before audio encoder: {available_gb:.1f} GB")
+                
+                if available_gb > 4.0:  # Conservative threshold for audio encoder
+                    audio_device = "cuda"
+                    print(f"✅ Using GPU for audio encoder with {available_gb:.1f}GB available")
+                else:
+                    audio_device = "cpu"
+                    print(f"⚠️ Using CPU for audio encoder - only {available_gb:.1f}GB GPU memory available")
+            except Exception as gpu_check_error:
+                print(f"⚠️ GPU check failed, using CPU: {gpu_check_error}")
+                audio_device = "cpu"
+        else:
+            audio_device = "cpu"
             
         try:
             # Use built-in Whisper 'tiny' model instead of checkpoint file
             audio_encoder = Audio2Feature(model_path="tiny", device=audio_device)
             
-            # 🔧 CRITICAL: Ensure audio encoder uses float32 precision and stays on CPU
+            # 🔧 CRITICAL: Ensure audio encoder uses float32 precision for stability
             if hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
-                # Force float32 precision and CPU to avoid dtype/device mismatch
-                audio_encoder.model = audio_encoder.model.float().cpu()
-                print("🔧 Set audio encoder to float32 precision on CPU")
+                # Force float32 precision for better GPU compatibility
+                audio_encoder.model = audio_encoder.model.float()
+                print(f"🔧 Set audio encoder to float32 precision on {audio_device}")
             
-            print("✅ Audio encoder loaded on CPU.")
+            print(f"✅ Audio encoder loaded on {audio_device}.")
             
             # Test the encoder with a small sample to ensure it works
             print("🧪 Testing audio encoder...")
@@ -173,10 +189,16 @@ def get_audio_encoder():
             print(f"❌ Failed to load audio encoder: {load_error}")
             raise RuntimeError(f"Could not initialize Audio2Feature: {load_error}")
     else:
-        # Ensure audio encoder stays on CPU
-        if hasattr(audio_encoder, 'model') and audio_encoder.model.device.type != 'cpu':
-            audio_encoder.model = audio_encoder.model.float().cpu()
-            print("🔄 Moved audio encoder back to CPU")
+        # Allow GPU usage if available and stable
+        if torch.cuda.is_available() and hasattr(audio_encoder, 'model') and audio_encoder.model.device.type != 'cuda':
+            try:
+                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                available_gb = available_memory / 1024**3
+                if available_gb > 4.0:
+                    audio_encoder.model = audio_encoder.model.float().cuda()
+                    print("🔄 Moved audio encoder to GPU with float32 precision")
+            except Exception as move_error:
+                print(f"⚠️ Audio encoder GPU move failed: {move_error}")
     return audio_encoder
 
 def get_vae():
@@ -184,17 +206,39 @@ def get_vae():
     global vae
     if vae is None:
         print("🖼️ Loading VAE model...")
-        # Force CPU to prevent CUDA memory corruption
-        vae_device = "cpu"
+        # Conservative GPU usage with FP32 for stability
+        if torch.cuda.is_available():
+            try:
+                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                available_gb = available_memory / 1024**3
+                print(f"💾 Available memory before VAE: {available_gb:.1f} GB")
+                
+                if available_gb > 6.0:  # Conservative threshold for FP32
+                    vae_device = "cuda"
+                    print(f"✅ Using GPU for VAE with {available_gb:.1f}GB available")
+                else:
+                    vae_device = "cpu"
+                    print(f"⚠️ Using CPU for VAE - only {available_gb:.1f}GB GPU memory available")
+            except Exception as gpu_check_error:
+                print(f"⚠️ GPU check failed, using CPU: {gpu_check_error}")
+                vae_device = "cpu"
+        else:
+            vae_device = "cpu"
             
-        # 🔧 Use float32 and force CPU to avoid dtype/device mismatches
+        # 🔧 Use float32 for better GPU compatibility
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(vae_device).float().eval()
-        print("✅ VAE loaded with float32 precision on CPU.")
+        print(f"✅ VAE loaded with float32 precision on {vae_device}.")
     else:
-        # Ensure VAE stays on CPU
-        if vae.device.type != 'cpu':
-            vae = vae.float().cpu()
-            print("🔄 Moved VAE back to CPU")
+        # Allow GPU usage if available and stable
+        if torch.cuda.is_available() and vae.device.type != 'cuda':
+            try:
+                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                available_gb = available_memory / 1024**3
+                if available_gb > 6.0:
+                    vae = vae.float().cuda()
+                    print("🔄 Moved VAE to GPU with float32 precision")
+            except Exception as move_error:
+                print(f"⚠️ VAE GPU move failed: {move_error}")
     return vae
 
 def get_projection_weight():
@@ -633,11 +677,11 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         
                         del latent_model_input  # Immediate cleanup
                         
-                        # ONNX inference with proper float16 conversion
+                        # ONNX inference with FP32 (matching ONNX model precision)
                         noise_pred = lip_syncer.run(None, {
-                            'sample': concatenated_latents.cpu().numpy().astype(numpy.float16),  # Convert to float16
+                            'sample': concatenated_latents.cpu().numpy().astype(numpy.float32),  # FP32
                             'timesteps': numpy.array([t.cpu().numpy()], dtype=numpy.int64),
-                            'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float16)  # Convert to float16
+                            'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float32)  # FP32
                         })[0]
                         
                         del concatenated_latents  # Immediate cleanup
@@ -1079,13 +1123,12 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
                 raise ValueError(f"Not enough channels: expected 4, got {latent.shape[1]}")
 
         with torch.no_grad():
-            # 🔧 CRITICAL: Force VAE to CPU to prevent memory corruption
+            # 🔧 CRITICAL: Conservative GPU usage with FP32 for stability
             vae_instance = get_vae()  # This will load it if needed
             
-            # Force CPU processing to prevent CUDA memory corruption
-            vae_instance = vae_instance.cpu()
-            latent = latent.to("cpu", dtype=torch.float32)
-            print("🔧 VAE decode forced to CPU to prevent CUDA memory corruption")
+            # Use same device as VAE with float32 precision
+            latent = latent.to(vae_instance.device, dtype=torch.float32)
+            print(f"🔧 VAE decode using {vae_instance.device} with float32 precision")
             
             # Apply VAE scaling
             vae_config = vae_instance.config
@@ -1100,9 +1143,21 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
             
             print(f"🔍 About to VAE decode shape: {latents.shape}")
             
-            # VAE decode on CPU
-            decoded_latents = vae_instance.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
-            print("✅ VAE decode completed on CPU")
+            # VAE decode with proper error handling
+            try:
+                decoded_latents = vae_instance.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
+                print(f"✅ VAE decode completed on {vae_instance.device}")
+            except Exception as decode_error:
+                print(f"⚠️ VAE decode failed on {vae_instance.device}: {decode_error}")
+                # Fallback to CPU if GPU fails
+                if vae_instance.device.type == 'cuda':
+                    print("🔄 Falling back to CPU for VAE decode")
+                    vae_instance = vae_instance.cpu()
+                    latents = latents.cpu()
+                    decoded_latents = vae_instance.decode(latents).sample
+                    print("✅ VAE decode completed on CPU (fallback)")
+                else:
+                    raise decode_error
 
         # Handle unexpected channel count
         if decoded_latents.shape[1] == 6:
