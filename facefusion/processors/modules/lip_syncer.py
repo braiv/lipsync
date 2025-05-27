@@ -427,31 +427,40 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     
                     # Shape: (1, 1, 1, 64, 64) - single channel mask
                     mask_latents = mouth_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                    print(f"🔍 Initial mask_latents shape: {mask_latents.shape}")
                     
                     # Duplicate masks for classifier-free guidance if needed
                     if do_classifier_free_guidance:
                         mask_latents = torch.cat([mask_latents] * 2)
+                        print(f"🔍 CFG mask_latents shape: {mask_latents.shape}")
                     
                     # 3. Create masked image latents
                     # Apply mask to video latents (mask out mouth region)
                     # First, ensure video_latent has temporal dimension: (1, 4, 64, 64) -> (1, 4, 1, 64, 64)
                     video_latent_5d = video_latent.unsqueeze(2)
+                    print(f"🔍 video_latent_5d shape: {video_latent_5d.shape}")
                     
                     # Apply mask: mask_latents is (1, 1, 1, 64, 64), need to expand to match 4 channels
                     # Expand mask to 4 channels: (1, 1, 1, 64, 64) -> (1, 4, 1, 64, 64)
                     mask_expanded = mask_latents[:1].repeat(1, 4, 1, 1, 1)
+                    print(f"🔍 mask_expanded shape: {mask_expanded.shape}")
+                    
                     masked_image_latents = video_latent_5d * (1 - mask_expanded)
+                    print(f"🔍 Initial masked_image_latents shape: {masked_image_latents.shape}")
                     
                     # Duplicate masked image latents for classifier-free guidance if needed
                     if do_classifier_free_guidance:
                         masked_image_latents = torch.cat([masked_image_latents] * 2)
+                        print(f"🔍 CFG masked_image_latents shape: {masked_image_latents.shape}")
                     
                     # Add temporal dimension to video_latent for reference
                     ref_latents = video_latent_5d
+                    print(f"🔍 Initial ref_latents shape: {ref_latents.shape}")
                     
                     # Duplicate reference latents for classifier-free guidance if needed
                     if do_classifier_free_guidance:
                         ref_latents = torch.cat([ref_latents] * 2)
+                        print(f"🔍 CFG ref_latents shape: {ref_latents.shape}")
                     
                     # 🧹 Clean up intermediate tensors
                     del video_latent, video_latent_5d, mask_expanded, mouth_mask
