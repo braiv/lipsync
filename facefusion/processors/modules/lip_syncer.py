@@ -797,6 +797,12 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
             shift_factor = getattr(vae_config, 'shift_factor', 0.0)
             scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215)
             
+            # Handle None values explicitly
+            if shift_factor is None:
+                shift_factor = 0.0
+            if scaling_factor is None:
+                scaling_factor = 0.18215
+            
             print(f"🔍 shift_factor: {shift_factor}")
             print(f"🔍 scaling_factor: {scaling_factor}")
             
@@ -856,6 +862,12 @@ def normalize_latentsync_frame(latent: torch.Tensor) -> VisionFrame:
             vae_config = get_vae().config
             shift_factor = getattr(vae_config, 'shift_factor', 0.0)
             scaling_factor = getattr(vae_config, 'scaling_factor', 0.18215)
+            
+            # Handle None values explicitly
+            if shift_factor is None:
+                shift_factor = 0.0
+            if scaling_factor is None:
+                scaling_factor = 0.18215
             
             latents = latent / scaling_factor + shift_factor
             
