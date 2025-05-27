@@ -345,6 +345,10 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
 def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> VisionFrame:
     lip_syncer = get_inference_pool().get('lip_syncer')  # ONNX Runtime session
     model_name = state_manager.get_item('lip_syncer_model')
+    
+    print(f"🔍 Forward function called with model: {model_name}")
+    print(f"🔍 Input close_vision_frame shape: {close_vision_frame.shape}")
+    print(f"🔍 Input close_vision_frame dtype: {close_vision_frame.dtype}")
 
     with conditional_thread_semaphore():
         if model_name == 'latentsync':
@@ -352,6 +356,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                 logger.error("LatentSync model selected but LatentSync is not available!", __name__)
                 return close_vision_frame
                 
+            print("🚀 Executing LatentSync path...")
             try:
                 with torch.no_grad():
                     # 🧹 Initial memory cleanup
@@ -532,6 +537,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         output_latent = torch.from_numpy(output_latent).to(torch.float16).to(device)
 
                     # Convert Input: (1, 4, 1, 64, 64) to Output: (512, 512, 3) for downstream transpose
+                    print(f"🔍 About to call normalize_latentsync_frame with shape: {output_latent.shape}")
                     close_vision_frame = normalize_latentsync_frame(output_latent)
                     
                     # 🧹 Final cleanup
@@ -540,6 +546,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
 
                     # After model inference
                     print("🔍 Model output shape:", close_vision_frame.shape if close_vision_frame is not None else "None")
+                    print("🔍 Model output dtype:", close_vision_frame.dtype if close_vision_frame is not None else "None")
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     logger.error(f"❌ OOM during LatentSync processing! Try reducing video resolution or disabling CFG.", __name__)
@@ -562,12 +569,17 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                 torch.cuda.empty_cache()
         else:
             # Wav2Lip-style direct inference with image and mel-spectrogram
+            print("🚀 Executing Wav2Lip path...")
+            print(f"🔍 Wav2Lip input shapes - audio: {temp_audio_frame.shape}, vision: {close_vision_frame.shape}")
+            
             close_vision_frame = lip_syncer.run(None, {
                 'source': temp_audio_frame,
                 'target': close_vision_frame
             })[0]
-
+            
+            print(f"🔍 Wav2Lip raw output shape: {close_vision_frame.shape}")
             close_vision_frame = normalize_close_frame(close_vision_frame)
+            print(f"🔍 Wav2Lip normalized output shape: {close_vision_frame.shape}")
 
     return close_vision_frame
 
