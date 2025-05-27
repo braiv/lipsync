@@ -925,6 +925,8 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
     Ultra-conservative VAE decode that immediately moves VAE back to CPU after use
     to prevent OOM issues in memory-constrained environments.
     """
+    global vae  # Move global declaration to top
+    
     if not isinstance(latent, torch.Tensor):
         raise TypeError("Input must be a torch tensor")
     
@@ -950,7 +952,6 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
 
         with torch.no_grad():
             # 🔧 CRITICAL: Move VAE back to GPU only when needed
-            global vae
             vae_model = get_vae()  # This will load it if needed
             
             # Ensure VAE is on GPU for decode
@@ -1016,7 +1017,6 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
 
     except Exception as e:
         # Emergency cleanup
-        global vae
         if vae is not None:
             try:
                 vae = vae.cpu()
