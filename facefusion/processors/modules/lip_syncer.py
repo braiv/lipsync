@@ -80,26 +80,34 @@ def reset_models_to_device(target_device="cpu"):
         print(f"🔄 Resetting all models to {target_device}...")
         
         # Reset audio encoder completely
-        if audio_encoder is not None and hasattr(audio_encoder, 'model'):
-            if target_device == "cpu":
-                audio_encoder.model = audio_encoder.model.cpu()
-            else:
-                audio_encoder.model = audio_encoder.model.to(target_device)
-            # Force all parameters to target device
-            for param in audio_encoder.model.parameters():
-                param.data = param.data.to(target_device)
-            print(f"✅ Audio encoder reset to {target_device}")
+        if audio_encoder is not None and hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
+            try:
+                if target_device == "cpu":
+                    audio_encoder.model = audio_encoder.model.cpu()
+                else:
+                    audio_encoder.model = audio_encoder.model.to(target_device)
+                # Force all parameters to target device
+                for param in audio_encoder.model.parameters():
+                    param.data = param.data.to(target_device)
+                print(f"✅ Audio encoder reset to {target_device}")
+            except Exception as audio_reset_error:
+                print(f"⚠️ Audio encoder reset failed: {audio_reset_error}")
+                # Don't set to None - just leave it as is and continue
         
         # Reset VAE completely  
         if vae is not None:
-            if target_device == "cpu":
-                vae = vae.cpu()
-            else:
-                vae = vae.to(target_device)
-            # Force all parameters to target device
-            for param in vae.parameters():
-                param.data = param.data.to(target_device)
-            print(f"✅ VAE reset to {target_device}")
+            try:
+                if target_device == "cpu":
+                    vae = vae.cpu()
+                else:
+                    vae = vae.to(target_device)
+                # Force all parameters to target device
+                for param in vae.parameters():
+                    param.data = param.data.to(target_device)
+                print(f"✅ VAE reset to {target_device}")
+            except Exception as vae_reset_error:
+                print(f"⚠️ VAE reset failed: {vae_reset_error}")
+                # Don't set to None - just leave it as is and continue
         
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -109,21 +117,15 @@ def reset_models_to_device(target_device="cpu"):
         
     except Exception as reset_error:
         print(f"❌ Model reset failed: {reset_error}")
-        # Emergency cleanup - try to clear everything
-        if audio_encoder is not None:
-            try:
-                del audio_encoder
-                audio_encoder = None
-            except:
-                pass
-        if vae is not None:
-            try:
-                del vae  
-                vae = None
-            except:
-                pass
+        # 🔧 CRITICAL FIX: Don't delete models on reset failure
+        # Just clear CUDA cache and continue - models can still work
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except:
+                pass
+        print("⚠️ Continuing with existing models despite reset failure...")
 
 
 def get_audio_encoder():
@@ -155,13 +157,32 @@ def get_audio_encoder():
             
         try:
             # Use built-in Whisper 'tiny' model instead of checkpoint file
+            print(f"🔧 Initializing Audio2Feature with model_path='tiny', device='{audio_device}'")
+            print(f"🔧 Audio2Feature class: {Audio2Feature}")
+            print(f"🔧 LATENTSYNC_AVAILABLE: {LATENTSYNC_AVAILABLE}")
+            
             audio_encoder = Audio2Feature(model_path="tiny", device=audio_device)
+            print(f"🔧 Audio2Feature constructor returned: {audio_encoder}")
+            print(f"🔧 Audio2Feature type: {type(audio_encoder)}")
+            
+            # 🔧 CRITICAL: Validate audio encoder was created successfully
+            if audio_encoder is None:
+                raise RuntimeError("Audio2Feature returned None")
+            
+            # 🔧 CRITICAL: Check if the encoder has the expected attributes
+            print(f"🔧 Audio encoder attributes: {dir(audio_encoder)}")
             
             # 🔧 CRITICAL: Ensure audio encoder uses float32 precision for stability
-            if hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
-                # Force float32 precision for better GPU compatibility
-                audio_encoder.model = audio_encoder.model.float()
-                print(f"🔧 Set audio encoder to float32 precision on {audio_device}")
+            if hasattr(audio_encoder, 'model'):
+                print(f"🔧 Audio encoder has 'model' attribute: {audio_encoder.model}")
+                if audio_encoder.model is not None:
+                    # Force float32 precision for better GPU compatibility
+                    audio_encoder.model = audio_encoder.model.float()
+                    print(f"🔧 Set audio encoder to float32 precision on {audio_device}")
+                else:
+                    print(f"⚠️ Warning: Audio encoder model is None")
+            else:
+                print(f"⚠️ Warning: Audio encoder has no model attribute")
             
             print(f"✅ Audio encoder loaded on {audio_device}.")
             
@@ -187,10 +208,22 @@ def get_audio_encoder():
                     
         except Exception as load_error:
             print(f"❌ Failed to load audio encoder: {load_error}")
+            print(f"❌ Load error type: {type(load_error)}")
+            import traceback
+            print(f"❌ Load error traceback: {traceback.format_exc()}")
+            # 🔧 CRITICAL FIX: Set audio_encoder to None on failure so it can be retried
+            audio_encoder = None
             raise RuntimeError(f"Could not initialize Audio2Feature: {load_error}")
     else:
+        # 🔧 CRITICAL: Validate existing audio encoder
+        if audio_encoder is None:
+            print("⚠️ Audio encoder is None, attempting to reload...")
+            # Recursive call to reload
+            audio_encoder = None  # Reset to trigger reload
+            return get_audio_encoder()
+        
         # Allow GPU usage if available and stable
-        if torch.cuda.is_available() and hasattr(audio_encoder, 'model') and audio_encoder.model.device.type != 'cuda':
+        if torch.cuda.is_available() and hasattr(audio_encoder, 'model') and audio_encoder.model is not None and audio_encoder.model.device.type != 'cuda':
             try:
                 available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
                 available_gb = available_memory / 1024**3
@@ -202,6 +235,11 @@ def get_audio_encoder():
                     print(f"⚠️ Insufficient GPU memory ({available_gb:.1f}GB) for audio encoder, keeping on CPU")
             except Exception as move_error:
                 print(f"⚠️ Audio encoder GPU move failed: {move_error}")
+    
+    # 🔧 FINAL VALIDATION: Ensure we return a valid encoder
+    if audio_encoder is None:
+        raise RuntimeError("Audio encoder is still None after initialization attempt")
+    
     return audio_encoder
 
 def get_vae():
@@ -897,12 +935,38 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             # This follows the same pattern as in lipsync_pipeline.py
             print("🔍 Calling audio2feat...")
             try:
-                # Validate that the audio encoder is properly loaded
-                encoder = get_audio_encoder()
-                if encoder is None:
-                    raise RuntimeError("Audio encoder is None")
-                if not hasattr(encoder, 'audio2feat'):
-                    raise RuntimeError("Audio encoder does not have audio2feat method")
+                # Validate that the audio encoder is properly loaded with retry logic
+                encoder = None
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        print(f"🔄 Audio encoder attempt {attempt + 1}/{max_retries}")
+                        encoder = get_audio_encoder()
+                        
+                        if encoder is None:
+                            raise RuntimeError("Audio encoder is None")
+                        if not hasattr(encoder, 'audio2feat'):
+                            raise RuntimeError("Audio encoder does not have audio2feat method")
+                        if not hasattr(encoder, 'model') or encoder.model is None:
+                            raise RuntimeError("Audio encoder model is None")
+                        
+                        # If we get here, encoder is valid
+                        print(f"✅ Audio encoder validated on attempt {attempt + 1}")
+                        break
+                        
+                    except Exception as encoder_error:
+                        print(f"⚠️ Audio encoder attempt {attempt + 1} failed: {encoder_error}")
+                        if attempt < max_retries - 1:
+                            # Clear the global encoder and try again
+                            global audio_encoder
+                            audio_encoder = None
+                            print("🔄 Clearing audio encoder for retry...")
+                            # Small delay before retry
+                            import time
+                            time.sleep(1)
+                        else:
+                            # Final attempt failed
+                            raise RuntimeError(f"Failed to initialize audio encoder after {max_retries} attempts: {encoder_error}")
                 
                 print(f"🔍 Audio encoder type: {type(encoder)}")
                 print(f"🔍 Calling audio2feat on file: {temp_audio_path}")
