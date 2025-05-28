@@ -268,40 +268,67 @@ def get_vae():
     global vae
     if vae is None:
         print("🖼️ Loading VAE model...")
-        # Conservative GPU usage with FP32 for stability
+        
+        # 🔧 CRITICAL: Use same device logic as audio encoder for consistency
         if torch.cuda.is_available():
-            try:
-                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-                available_gb = available_memory / 1024**3
-                print(f"💾 Available memory before VAE: {available_gb:.1f} GB")
-                
-                if available_gb > 6.0:  # Conservative threshold for FP32
-                    vae_device = "cuda"
-                    print(f"✅ Using GPU for VAE with {available_gb:.1f}GB available")
-                else:
-                    vae_device = "cpu"
-                    print(f"⚠️ Using CPU for VAE - only {available_gb:.1f}GB GPU memory available")
-            except Exception as gpu_check_error:
-                print(f"⚠️ GPU check failed, using CPU: {gpu_check_error}")
-                vae_device = "cpu"
+            vae_device = "cuda"
+            print(f"✅ Using GPU for VAE (consistent with audio encoder)")
         else:
             vae_device = "cpu"
+            print(f"⚠️ Using CPU for VAE (CUDA not available)")
             
         # 🔧 Use float32 for better GPU compatibility
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(vae_device).float().eval()
         print(f"✅ VAE loaded with float32 precision on {vae_device}.")
     else:
-        # Allow GPU usage if available and stable
+        # 🔧 CRITICAL: Ensure VAE stays on GPU if available (consistent with audio encoder)
         if torch.cuda.is_available() and vae.device.type != 'cuda':
             try:
-                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-                available_gb = available_memory / 1024**3
-                if available_gb > 6.0:
-                    vae = vae.float().cuda()
-                    print("🔄 Moved VAE to GPU with float32 precision")
+                vae = vae.float().cuda()
+                print("🔄 Moved VAE to GPU with float32 precision for consistency")
             except Exception as move_error:
                 print(f"⚠️ VAE GPU move failed: {move_error}")
     return vae
+
+def verify_device_consistency():
+    """
+    Verify that audio encoder and VAE are on the same device.
+    Returns the common device if consistent, raises error if not.
+    """
+    global audio_encoder, vae
+    
+    devices = []
+    
+    # Check audio encoder device
+    if audio_encoder is not None and hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
+        audio_device = audio_encoder.model.device
+        devices.append(('audio_encoder', audio_device))
+        print(f"🔍 Audio encoder device: {audio_device}")
+    else:
+        print("⚠️ Audio encoder not available for device check")
+    
+    # Check VAE device
+    if vae is not None:
+        vae_device = vae.device
+        devices.append(('vae', vae_device))
+        print(f"🔍 VAE device: {vae_device}")
+    else:
+        print("⚠️ VAE not available for device check")
+    
+    if len(devices) < 2:
+        print("⚠️ Cannot verify device consistency - not all models loaded")
+        return None
+    
+    # Check if all devices are the same
+    device_types = set(device.type for _, device in devices)
+    
+    if len(device_types) == 1:
+        common_device = devices[0][1].type
+        print(f"✅ Device consistency verified: all models on {common_device}")
+        return common_device
+    else:
+        device_info = ", ".join(f"{name}: {device}" for name, device in devices)
+        raise RuntimeError(f"❌ Device inconsistency detected! {device_info}")
 
 def get_projection_weight():
     """Lazy loading of projection weight"""
@@ -610,16 +637,64 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     # 🧹 AGGRESSIVE MEMORY CLEANUP at start
                     torch.cuda.empty_cache()
                     
+                    # 🔧 CRITICAL: Determine target device FIRST and ensure ALL models use it
+                    target_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    print(f"🔧 Target device determined: {target_device}")
+                    
+                    # 🔧 ENSURE ALL MODELS ARE ON THE SAME DEVICE
+                    print("🔧 Ensuring all models are on the same device...")
+                    
+                    # Move audio encoder to target device if needed
+                    if audio_encoder is not None and hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
+                        current_audio_device = audio_encoder.model.device
+                        if current_audio_device.type != target_device:
+                            print(f"🔧 Moving audio encoder from {current_audio_device} to {target_device}")
+                            audio_encoder.model = audio_encoder.model.to(target_device).float()
+                            # Ensure ALL parameters are on target device
+                            for name, param in audio_encoder.model.named_parameters():
+                                if param.device.type != target_device:
+                                    param.data = param.data.to(target_device)
+                            # Ensure ALL buffers are on target device  
+                            for name, buffer in audio_encoder.model.named_buffers():
+                                if buffer.device.type != target_device:
+                                    buffer.data = buffer.data.to(target_device)
+                    
+                    # Move VAE to target device if needed
+                    vae_instance = get_vae()
+                    current_vae_device = vae_instance.device
+                    if current_vae_device.type != target_device:
+                        print(f"🔧 Moving VAE from {current_vae_device} to {target_device}")
+                        if target_device == "cpu":
+                            vae_instance = vae_instance.cpu().float()
+                        else:
+                            vae_instance = vae_instance.to(target_device).float()
+                        # Update global VAE reference
+                        global vae
+                        vae = vae_instance
+                    
+                    print(f"✅ All models confirmed on {target_device}")
+                    
+                    # 🔧 CRITICAL: Verify device consistency between all models
+                    try:
+                        common_device = verify_device_consistency()
+                        if common_device != target_device:
+                            print(f"⚠️ Warning: Models on {common_device} but target is {target_device}")
+                    except Exception as consistency_error:
+                        print(f"❌ Device consistency check failed: {consistency_error}")
+                        # Try to fix by forcing all models to target device
+                        reset_models_to_device(target_device)
+                    
+                    # 🧹 AGGRESSIVE MEMORY CLEANUP at start
+                    torch.cuda.empty_cache()
+                    
                     # 🔧 ENSURE COMPLETE DEVICE CONSISTENCY
                     print("🔧 Ensuring complete device consistency for audio processing...")
                     
-                    # Reset everything to CPU first, then move to target device
-                    reset_models_to_device("cpu")
-                    
-                    target_device = "cpu"
+                    # Reset everything to target device
+                    reset_models_to_device(target_device)
                     
                     # 💾 Check available memory and use ULTRA-CONSERVATIVE settings
-                    if torch.cuda.is_available():
+                    if torch.cuda.is_available() and target_device == "cuda":
                         available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
                         available_gb = available_memory / 1024**3
                         print(f"💾 Available GPU memory: {available_gb:.1f} GB")
@@ -644,10 +719,16 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     print(f"🔍 Input temp_audio_frame type: {type(temp_audio_frame)}")
                     audio_tensor = prepare_latentsync_audio(temp_audio_frame, sample_rate=16000)
                     print(f"🔍 Audio tensor shape: {audio_tensor.shape}")
+                    print(f"🔍 Audio tensor device: {audio_tensor.device}")
+                    
+                    # 🔧 CRITICAL: Ensure audio tensor is on target device
+                    if audio_tensor.device.type != target_device:
+                        print(f"🔧 Moving audio tensor from {audio_tensor.device} to {target_device}")
+                        audio_tensor = audio_tensor.to(target_device)
                     
                     # 🧹 IMMEDIATELY offload audio encoder to CPU to save memory
                     if audio_encoder is not None and hasattr(audio_encoder, 'model'):
-                        # 🔧 Keep audio encoder on GPU for device consistency
+                        # 🔧 Keep audio encoder on target device for device consistency
                         torch.cuda.empty_cache()
                         
                         # Apply classifier-free guidance for audio only if needed
@@ -660,12 +741,17 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                                          
                     # 🏗️ STEP 2: Prepare video with VAE cleanup
                     video_latent = prepare_latentsync_frame(close_vision_frame)
+                    print(f"🔍 Video latent device: {video_latent.device}")
                     
-                    # 🧹 Clear cache after VAE encoding (keep VAE on GPU for consistency)
+                    # 🔧 CRITICAL: Ensure video latent is on target device
+                    if video_latent.device.type != target_device:
+                        print(f"🔧 Moving video latent from {video_latent.device} to {target_device}")
+                        video_latent = video_latent.to(target_device)
+                    
+                    # 🧹 Clear cache after VAE encoding (keep VAE on target device for consistency)
                     torch.cuda.empty_cache()
                     
                     # 🏗️ STEP 3: Setup minimal diffusion (ultra-conservative)
-                    target_device = "cuda" if torch.cuda.is_available() else "cpu"
                     noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float32, device=target_device)
                     
                     # Simple mouth mask (no complex masking to save memory)
@@ -1009,6 +1095,14 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 target_device = audio_feat.device
                 audio_feat = audio_feat.to(target_device, dtype=torch.float32)
                 
+                # 🔧 CRITICAL: Ensure output is on same device as audio encoder
+                encoder = get_audio_encoder()
+                if hasattr(encoder, 'model') and encoder.model is not None:
+                    encoder_device = encoder.model.device
+                    if audio_feat.device != encoder_device:
+                        print(f"🔧 Moving audio features from {audio_feat.device} to {encoder_device}")
+                        audio_feat = audio_feat.to(encoder_device, dtype=torch.float32)
+                
                 # Ensure no mixed precision - force FP32 throughout
                 if audio_feat.dtype != torch.float32:
                     print(f"🔧 Converting audio features from {audio_feat.dtype} to float32")
@@ -1112,20 +1206,20 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         # ✅ Change shape to (1, 3, 512, 512)
         tensor = torch.from_numpy(numpy.transpose(normalized, (2, 0, 1))).unsqueeze(0)
 
-        # Move tensor to target device (VAE device) and ensure FP32
-        target_device = "cpu"  # Force CPU to prevent CUDA memory corruption
-        
-        tensor = tensor.to(target_device, dtype=torch.float32)  # Explicit FP32
-        print(f"🔧 Input tensor moved to {target_device} with dtype: {tensor.dtype}")
-
         # ✅ Encode with VAE to get latent representation
         vae_instance = get_vae()
         
-        # Force VAE to stay on CPU to prevent CUDA memory corruption and ensure FP32
-        vae_instance = vae_instance.cpu().float()  # Explicit FP32
-        target_device = "cpu"
-        tensor = tensor.to("cpu", dtype=torch.float32)  # Explicit FP32
-        print(f"🔧 VAE forced to CPU with FP32 precision")
+        # 🔧 CRITICAL: Ensure device consistency between tensor and VAE
+        vae_device = vae_instance.device
+        print(f"🔧 VAE is on device: {vae_device}")
+        
+        # Move tensor to same device as VAE and ensure FP32
+        tensor = tensor.to(vae_device, dtype=torch.float32)
+        print(f"🔧 Input tensor moved to {vae_device} with dtype: {tensor.dtype}")
+        
+        # Ensure VAE is in FP32 precision for stability
+        vae_instance = vae_instance.float()
+        print(f"🔧 VAE set to FP32 precision on {vae_device}")
         
         with torch.no_grad():
             try:
@@ -1138,13 +1232,12 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
                 
             except RuntimeError as encode_error:
                 print(f"❌ VAE encoding failed: {encode_error}")
-                # Try CPU fallback
+                # Try CPU fallback with proper device consistency
                 print("🔄 Trying VAE encoding on CPU as fallback...")
                 try:
-                    target_device = "cpu"
-                    tensor = tensor.cpu()
-                    vae_instance = vae_instance.cpu()
-                    torch.cuda.synchronize() if torch.cuda.is_available() else None
+                    vae_instance = vae_instance.cpu().float()  # Move VAE to CPU
+                    tensor = tensor.cpu().to(torch.float32)    # Move tensor to CPU
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
                     
                     encode_result = vae_instance.encode(tensor)
                     latent = encode_result.latent_dist.sample()
@@ -1177,8 +1270,12 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         latent = (latent - shift_factor) * scaling_factor
         latent = latent.to(torch.float32)  # Ensure FP32 precision
         
+        # 🔧 CRITICAL: Ensure output latent is on same device as VAE
+        latent = latent.to(vae_instance.device, dtype=torch.float32)
+        
         print("🔍 VAE latent shape:", latent.shape)
         print("🔍 VAE latent dtype:", latent.dtype)
+        print("🔍 VAE latent device:", latent.device)
         print("🔍 VAE latent - min/max:", latent.min().item(), latent.max().item())
         print("🔍 VAE latent - mean:", latent.mean().item())
 
