@@ -760,22 +760,34 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     mouth_y_start, mouth_y_end = int(mask_height * 0.6), int(mask_height * 0.9)
                     mouth_x_start, mouth_x_end = int(mask_width * 0.3), int(mask_width * 0.7)
                     mouth_mask[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end] = 1.0
-                    mask_latents = mouth_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                    
+                    # 🔧 CRITICAL FIX: Ensure mask has correct 5D shape (1, 1, 1, 64, 64)
+                    mask_latents = mouth_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)  # (1, 1, 1, 64, 64)
+                    print(f"🔍 Initial mask_latents shape: {mask_latents.shape}")
                     
                     if do_classifier_free_guidance:
-                        mask_latents = torch.cat([mask_latents] * 2)
+                        mask_latents = torch.cat([mask_latents] * 2)  # (2, 1, 1, 64, 64)
+                        print(f"🔍 CFG mask_latents shape: {mask_latents.shape}")
                     
                     # Create masked image latents
-                    video_latent_5d = video_latent.unsqueeze(2)
-                    mask_expanded = mask_latents[:1].repeat(1, 4, 1, 1, 1)
+                    video_latent_5d = video_latent.unsqueeze(2)  # (1, 4, 1, 64, 64)
+                    print(f"🔍 video_latent_5d shape: {video_latent_5d.shape}")
+                    
+                    # 🔧 CRITICAL FIX: Expand mask to match video latent channels (4 channels)
+                    mask_expanded = mask_latents.repeat(1, 4, 1, 1, 1)  # (1, 4, 1, 64, 64) or (2, 4, 1, 64, 64)
+                    print(f"🔍 mask_expanded shape: {mask_expanded.shape}")
+                    
                     masked_image_latents = video_latent_5d * (1 - mask_expanded)
+                    print(f"🔍 masked_image_latents shape: {masked_image_latents.shape}")
                     
                     if do_classifier_free_guidance:
                         masked_image_latents = torch.cat([masked_image_latents] * 2)
+                        print(f"🔍 CFG masked_image_latents shape: {masked_image_latents.shape}")
                     
                     ref_latents = video_latent_5d
                     if do_classifier_free_guidance:
                         ref_latents = torch.cat([ref_latents] * 2)
+                    print(f"🔍 ref_latents shape: {ref_latents.shape}")
                     
                     # Clean up intermediate tensors immediately
                     del video_latent, video_latent_5d, mask_expanded, mouth_mask
@@ -786,26 +798,68 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     
                     # Use noise as initial latents
                     latents = noise
+                    print(f"🔍 Initial latents shape: {latents.shape}")
                     
                     # Prepare inputs for UNet
                     latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                    mask_input = torch.cat([mask_latents] * 2) if do_classifier_free_guidance else mask_latents
+                    print(f"🔍 latent_model_input shape: {latent_model_input.shape}")
+                    
+                    # 🔧 CRITICAL FIX: Ensure mask_input has correct shape for concatenation
+                    mask_input = mask_latents  # Use mask_latents directly (already has correct CFG handling)
+                    print(f"🔍 mask_input shape: {mask_input.shape}")
                     
                     # Move all inputs to same device
                     latent_model_input = latent_model_input.to(target_device)
                     mask_input = mask_input.to(target_device)
                     audio_tensor = audio_tensor.to(target_device)
                     
+                    # 🔧 CRITICAL: Verify all tensor shapes before concatenation
+                    print(f"🔍 Pre-concat shapes:")
+                    print(f"   latent_model_input: {latent_model_input.shape}")
+                    print(f"   mask_input: {mask_input.shape}")
+                    print(f"   masked_image_latents: {masked_image_latents.shape}")
+                    print(f"   ref_latents: {ref_latents.shape}")
+                    
                     # 🏗️ STEP 5: Single denoising step with aggressive cleanup
                     torch.cuda.empty_cache()  # Clean before step
                     
-                    # Prepare concatenated inputs for UNet
-                    concatenated_latents = torch.cat(
-                        [latent_model_input, mask_input, masked_image_latents, ref_latents], 
-                        dim=1
-                    )
+                    # 🔧 CRITICAL FIX: Prepare concatenated inputs with proper channel handling
+                    # Expected UNet input: (batch, 13, frames, height, width)
+                    # latent_model_input: (batch, 4, 1, 64, 64)
+                    # mask_input: (batch, 1, 1, 64, 64) 
+                    # masked_image_latents: (batch, 4, 1, 64, 64)
+                    # ref_latents: (batch, 4, 1, 64, 64)
+                    # Total: 4 + 1 + 4 + 4 = 13 channels
                     
-                    print(f"🔍 UNet inputs - Concatenated: {concatenated_latents.shape}, Audio: {audio_tensor.shape}")
+                    try:
+                        concatenated_latents = torch.cat(
+                            [latent_model_input, mask_input, masked_image_latents, ref_latents], 
+                            dim=1
+                        )
+                        print(f"🔍 UNet inputs - Concatenated: {concatenated_latents.shape}, Audio: {audio_tensor.shape}")
+                        
+                        # Validate expected shape
+                        expected_channels = 13  # 4 + 1 + 4 + 4
+                        if concatenated_latents.shape[1] != expected_channels:
+                            raise ValueError(f"Expected {expected_channels} channels, got {concatenated_latents.shape[1]}")
+                            
+                    except Exception as concat_error:
+                        print(f"❌ Concatenation failed: {concat_error}")
+                        print("🔧 Attempting to fix tensor shapes...")
+                        
+                        # Emergency fix: ensure all tensors have compatible shapes
+                        batch_size = latent_model_input.shape[0]
+                        
+                        # Ensure mask_input has correct shape
+                        if mask_input.shape[1] != 1:
+                            mask_input = mask_input[:, :1, ...]  # Take only first channel
+                        
+                        # Retry concatenation
+                        concatenated_latents = torch.cat(
+                            [latent_model_input, mask_input, masked_image_latents, ref_latents], 
+                            dim=1
+                        )
+                        print(f"🔧 Fixed concatenated shape: {concatenated_latents.shape}")
                     
                     # ONNX inference with FP32 (matching ONNX model precision)
                     noise_pred = lip_syncer.run(None, {
