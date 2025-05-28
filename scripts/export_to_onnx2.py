@@ -51,7 +51,7 @@ if torch.cuda.is_available():
 
 # 📦 Load checkpoint and process state_dict
 print("📦 Loading checkpoint...")
-checkpoint = torch.load(ckpt_path, map_location=device)
+checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
 state_dict = checkpoint.get("state_dict", checkpoint)
 state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
 model.load_state_dict(state_dict)
