@@ -929,12 +929,6 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     mask_latents = torch.clamp(mask_latents, 0.0, 1.0)
                     print(f"🔍 Clamped mask range: [{mask_latents.min():.3f}, {mask_latents.max():.3f}]")
                     
-                    # 🔧 CRITICAL: Verify all tensor shapes before concatenation
-                    print(f"🔍 Pre-concat shapes:")
-                    print(f"   latent_model_input: {latent_model_input.shape}")
-                    print(f"   mask_input: {mask_input.shape}")
-                    print(f"   masked_image_latents: {masked_image_latents.shape}")
-                    print(f"   ref_latents: {ref_latents.shape}")
                     
                     # 🔧 CRITICAL: Ensure mask values are in correct range [0, 1]
                     mask_latents = torch.clamp(mask_latents, 0.0, 1.0)
@@ -977,19 +971,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     mask_input = mask_input.to(target_device)
                     audio_tensor = audio_tensor.to(target_device)
                     
-                    # 🔧 CRITICAL: Verify all tensor shapes before concatenation
-                    print(f"🔍 Pre-concat shapes:")
-                    print(f"   latent_model_input: {latent_model_input.shape}")
-                    print(f"   mask_input: {mask_input.shape}")
-                    print(f"   masked_image_latents: {masked_image_latents.shape}")
-                    print(f"   ref_latents: {ref_latents.shape}")
                     
-                    # 🔧 CRITICAL: Verify all tensor shapes before concatenation
-                    print(f"🔍 Pre-concat shapes:")
-                    print(f"   latent_model_input: {latent_model_input.shape}")
-                    print(f"   mask_input: {mask_input.shape}")
-                    print(f"   masked_image_latents: {masked_image_latents.shape}")
-                    print(f"   ref_latents: {ref_latents.shape}")
                     
                     # 🏗️ STEP 6: Single denoising step with aggressive cleanup
                     torch.cuda.empty_cache()  # Clean before step
