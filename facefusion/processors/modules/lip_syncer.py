@@ -572,6 +572,25 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
     print(f"🔍 Input close_vision_frame shape: {close_vision_frame.shape}")
     print(f"🔍 Input close_vision_frame dtype: {close_vision_frame.dtype}")
 
+    # 🔥 CRITICAL: Smart device selection based on available memory
+    if torch.cuda.is_available() and model_name == 'latentsync':
+        available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+        available_gb = available_memory / 1024**3
+        print(f"💾 Available GPU memory: {available_gb:.1f} GB")
+        
+        # Smart device selection: Use GPU only if we have enough memory
+        if available_gb >= 6.0:  # Need at least 6GB for stable LatentSync processing
+            target_device = "cuda"
+            print(f"✅ Using GPU for LatentSync (sufficient memory: {available_gb:.1f}GB)")
+        else:
+            target_device = "cpu"
+            print(f"⚠️ Using CPU for LatentSync (insufficient GPU memory: {available_gb:.1f}GB)")
+            # Clear GPU memory for other processes
+            torch.cuda.empty_cache()
+    else:
+        target_device = "cpu"
+        print("🔧 Using CPU for processing")
+
     # 🧹 AGGRESSIVE GPU MEMORY CLEANUP before loading ONNX model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -637,19 +656,21 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     # 🧹 AGGRESSIVE MEMORY CLEANUP at start
                     torch.cuda.empty_cache()
                     
-                    # 🔧 CRITICAL: Determine target device FIRST and ensure ALL models use it
-                    target_device = "cuda" if torch.cuda.is_available() else "cpu"
-                    print(f"🔧 Target device determined: {target_device}")
+                    # 🔧 CRITICAL: Use the pre-determined target device consistently
+                    print(f"🔧 Using consistent device: {target_device}")
                     
-                    # 🔧 ENSURE ALL MODELS ARE ON THE SAME DEVICE
-                    print("🔧 Ensuring all models are on the same device...")
+                    # 🔧 ENSURE ALL MODELS ARE ON THE CHOSEN DEVICE (no switching)
+                    print("🔧 Ensuring all models are on the chosen device...")
                     
                     # Move audio encoder to target device if needed
                     if audio_encoder is not None and hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
                         current_audio_device = audio_encoder.model.device
                         if current_audio_device.type != target_device:
                             print(f"🔧 Moving audio encoder from {current_audio_device} to {target_device}")
-                            audio_encoder.model = audio_encoder.model.to(target_device).float()
+                            if target_device == "cpu":
+                                audio_encoder.model = audio_encoder.model.cpu().float()
+                            else:
+                                audio_encoder.model = audio_encoder.model.cuda().float()
                             # Ensure ALL parameters are on target device
                             for name, param in audio_encoder.model.named_parameters():
                                 if param.device.type != target_device:
@@ -667,50 +688,36 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         if target_device == "cpu":
                             vae_instance = vae_instance.cpu().float()
                         else:
-                            vae_instance = vae_instance.to(target_device).float()
+                            vae_instance = vae_instance.cuda().float()
                         # Update global VAE reference
                         global vae
                         vae = vae_instance
                     
                     print(f"✅ All models confirmed on {target_device}")
                     
-                    # 🔧 CRITICAL: Verify device consistency between all models
-                    try:
-                        common_device = verify_device_consistency()
-                        if common_device != target_device:
-                            print(f"⚠️ Warning: Models on {common_device} but target is {target_device}")
-                    except Exception as consistency_error:
-                        print(f"❌ Device consistency check failed: {consistency_error}")
-                        # Try to fix by forcing all models to target device
-                        reset_models_to_device(target_device)
-                    
-                    # 🧹 AGGRESSIVE MEMORY CLEANUP at start
-                    torch.cuda.empty_cache()
-                    
-                    # 🔧 ENSURE COMPLETE DEVICE CONSISTENCY
-                    print("🔧 Ensuring complete device consistency for audio processing...")
-                    
-                    # Reset everything to target device
-                    reset_models_to_device(target_device)
-                    
-                    # 💾 Check available memory and use ULTRA-CONSERVATIVE settings
-                    if torch.cuda.is_available() and target_device == "cuda":
+                    # 💾 Memory-aware processing settings
+                    if target_device == "cpu":
+                        # CPU settings: minimal steps, no CFG
+                        guidance_scale = 1.0  # Disable CFG for CPU
+                        num_inference_steps = 1  # Single step for CPU
+                        print("🔧 Using CPU-optimized settings: no CFG, single step")
+                    else:
+                        # GPU settings: check available memory for appropriate settings
                         available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
                         available_gb = available_memory / 1024**3
-                        print(f"💾 Available GPU memory: {available_gb:.1f} GB")
                         
-                        # 🔥 ULTRA-CONSERVATIVE SETTINGS for memory constrained system
-                        if available_gb < 15.0:  # Less than 15GB available (very conservative)
-                            print("⚠️ Memory constrained! Using ultra-minimal settings.")
-                            guidance_scale = 1.0  # Disable CFG completely
-                            num_inference_steps = 3   # Absolute minimum steps
+                        if available_gb >= 10.0:
+                            guidance_scale = 1.5
+                            num_inference_steps = 5
+                            print("🚀 High memory: using enhanced settings")
+                        elif available_gb >= 8.0:
+                            guidance_scale = 1.2
+                            num_inference_steps = 3
+                            print("🔧 Medium memory: using balanced settings")
                         else:
-                            print("🚀 Good memory detected! Using standard settings.")
-                            guidance_scale = 1.2  # Reduced CFG
-                            num_inference_steps = 8  # Reduced steps
-                    else:
-                        guidance_scale = 1.0
-                        num_inference_steps = 3
+                            guidance_scale = 1.0
+                            num_inference_steps = 1
+                            print("⚠️ Low memory: using minimal settings")
                     
                     do_classifier_free_guidance = guidance_scale > 1.0
                     
@@ -1346,11 +1353,10 @@ def prepare_latentsync_frame(vision_frame: VisionFrame) -> torch.Tensor:
         raise RuntimeError(f"❌ Failed to prepare vision frame: {str(e)}")
 
 
-# Ultra-conservative VAE decode that immediately offloads VAE after use
 def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame:
     """
-    Ultra-conservative VAE decode that immediately moves VAE back to CPU after use
-    to prevent OOM issues in memory-constrained environments.
+    Memory-aware VAE decode that chooses the best device based on available memory
+    and sticks with it throughout the process.
     """
     global vae  # Move global declaration to top
     
@@ -1378,12 +1384,34 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
                 raise ValueError(f"Not enough channels: expected 4, got {latent.shape[1]}")
 
         with torch.no_grad():
-            # 🔧 CRITICAL: Conservative GPU usage with FP32 for stability
+            # 🔧 CRITICAL: Smart device selection (choose once, stick with it)
             vae_instance = get_vae()  # This will load it if needed
             
-            # Use same device as VAE with float32 precision
-            latent = latent.to(vae_instance.device, dtype=torch.float32)
-            print(f"🔧 VAE decode using {vae_instance.device} with float32 precision")
+            # Determine best device based on current memory situation
+            if torch.cuda.is_available():
+                available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                available_gb = available_memory / 1024**3
+                
+                # Use GPU only if we have sufficient memory for stable processing
+                if available_gb >= 3.0:  # Need at least 3GB for VAE decode
+                    target_device = "cuda"
+                    print(f"✅ Using GPU for VAE decode ({available_gb:.1f}GB available)")
+                else:
+                    target_device = "cpu"
+                    print(f"⚠️ Using CPU for VAE decode (insufficient GPU memory: {available_gb:.1f}GB)")
+            else:
+                target_device = "cpu"
+                print("🔧 Using CPU for VAE decode (CUDA not available)")
+            
+            # Move models and tensors to chosen device (no switching)
+            if target_device == "cpu":
+                vae_instance = vae_instance.cpu().float()
+                latent = latent.cpu().to(torch.float32)
+            else:
+                vae_instance = vae_instance.cuda().float()
+                latent = latent.cuda().to(torch.float32)
+            
+            print(f"🔧 VAE decode using {target_device} with float32 precision")
             
             # Apply VAE scaling
             vae_config = vae_instance.config
@@ -1399,19 +1427,15 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
             
             print(f"🔍 About to VAE decode shape: {latents.shape}")
             
-            # VAE decode with proper error handling
+            # VAE decode with single-device approach
             try:
                 decoded_latents = vae_instance.decode(latents).sample  # (1, 4, 64, 64) → (1, 3, 512, 512)
-                print(f"✅ VAE decode completed on {vae_instance.device}")
-            except Exception as decode_error:
-                print(f"⚠️ VAE decode failed on {vae_instance.device}: {decode_error}")
-                # Fallback to CPU if GPU fails
-                if vae_instance.device.type == 'cuda':
-                    print("🔄 Falling back to CPU for VAE decode")
-                    vae_instance = vae_instance.cpu().float()  # Ensure FP32
-                    latents = latents.cpu().to(torch.float32)  # Ensure FP32
-                    decoded_latents = vae_instance.decode(latents).sample
-                    print("✅ VAE decode completed on CPU (fallback)")
+                print(f"✅ VAE decode completed on {target_device}")
+            except RuntimeError as decode_error:
+                if "out of memory" in str(decode_error).lower():
+                    print(f"❌ OOM during VAE decode on {target_device}")
+                    # Don't switch devices - just fail gracefully
+                    raise RuntimeError(f"VAE decode failed due to insufficient memory on {target_device}")
                 else:
                     raise decode_error
 
@@ -1440,13 +1464,10 @@ def normalize_latentsync_frame_conservative(latent: torch.Tensor) -> VisionFrame
         return image_bgr
 
     except Exception as e:
-        # Emergency cleanup
-        if vae is not None:
-            try:
-                vae = vae.cpu()
-                torch.cuda.empty_cache()
-            except:
-                pass
+        # Emergency cleanup without device switching
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("🧹 Emergency GPU cache cleanup completed")
         raise RuntimeError(f"❌ Conservative decode failed: {str(e)}")
 
 
@@ -1479,12 +1500,21 @@ def process_frame(inputs : LipSyncerInputs) -> VisionFrame:
 	# 🧹 AGGRESSIVE CLEANUP after each frame to prevent memory leaks
 	model_name = state_manager.get_item('lip_syncer_model')
 	if model_name == 'latentsync':
-		# Clear GPU cache without moving models to CPU (keep device consistency)
+		# 🔥 Simple memory cleanup without device switching
 		try:
+			print("🧹 Cleaning up GPU memory after LatentSync frame...")
+			
+			# Simple GPU cache cleanup
 			if torch.cuda.is_available():
 				torch.cuda.empty_cache()
 				torch.cuda.synchronize()
-			print("🧹 GPU cache cleared after LatentSync frame processing")
+				
+				# Check memory after cleanup
+				allocated = torch.cuda.memory_allocated() / 1024**3
+				print(f"💾 GPU memory after cleanup: {allocated:.2f} GB")
+			
+			print("✅ Memory cleanup completed")
+			
 		except Exception as cleanup_error:
 			print(f"⚠️ Cleanup warning: {cleanup_error}")
 	
