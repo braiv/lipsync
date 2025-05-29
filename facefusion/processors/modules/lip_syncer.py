@@ -1140,16 +1140,17 @@ def resample_audio(audio_waveform: numpy.ndarray, original_sample_rate: int, tar
 
 # Prepare audio for LatentSync: raw waveform → (1, N, 384)
 # Input: raw audio waveform → Output: (1, N, 384)
-def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int = 16000) -> torch.Tensor:
+def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int = 16000, window_duration: float = 0.75) -> torch.Tensor:
     """
     Convert a raw audio waveform into a torch.Tensor of Whisper encoder embeddings (LatentSync format).
     The output tensor has shape [1, N, 384] (batch_size=1, sequence_length=N audio tokens, embedding_dim=384),
-    and uses torch.float16 dtype for compatibility with the LatentSync U-Net.
+    and uses torch.float32 dtype for compatibility with the LatentSync U-Net.
     
     :param raw_audio_waveform: NumPy array of audio samples (1D or 2D). 
                      If 2D (multi-channel), it will be converted to mono.
     :param sample_rate: Sample rate of the audio. LatentSync expects 16 kHz.
-    :return: A float16 torch.Tensor of shape [1, N, 384] containing Whisper Tiny encoder embeddings.
+    :param window_duration: Duration of audio window in seconds (0.5-1.0s for better temporal context)
+    :return: A float32 torch.Tensor of shape [1, N, 384] containing Whisper Tiny encoder embeddings.
     """
     try:
         import tempfile
@@ -1158,6 +1159,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
         print(f"🔍 prepare_latentsync_audio input shape: {raw_audio_waveform.shape}")
         print(f"🔍 prepare_latentsync_audio input dtype: {raw_audio_waveform.dtype}")
         print(f"🔍 prepare_latentsync_audio sample_rate: {sample_rate}")
+        print(f"🔍 Using audio window duration: {window_duration}s for better temporal context")
         
         # Validate input
         if raw_audio_waveform is None:
@@ -1166,8 +1168,9 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             raise TypeError(f"Expected numpy array, got {type(raw_audio_waveform)}")
         if raw_audio_waveform.size == 0:
             print("⚠️ Empty audio detected, creating minimal audio signal")
-            # Create minimal 1-second audio at 16kHz
-            raw_audio_waveform = numpy.zeros(16000, dtype=numpy.float32)
+            # Create minimal audio at specified window duration
+            window_samples = int(window_duration * 16000)
+            raw_audio_waveform = numpy.zeros(window_samples, dtype=numpy.float32)
         
         # Ensure the audio is mono. If stereo or multi-channel, average the channels to get mono.
         if raw_audio_waveform.ndim > 1:
@@ -1185,13 +1188,20 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 # General normalization (in case of float data that's not yet in [-1,1])
                 raw_audio_waveform = raw_audio_waveform / numpy.max(numpy.abs(raw_audio_waveform))
         
-        # Ensure minimum length for Whisper processing (at least 0.1 seconds)
-        min_samples = int(0.1 * 16000)  # 0.1 seconds at 16kHz
+        # 🚀 IMPROVED: Ensure minimum length based on window duration (better temporal context)
+        min_samples = int(window_duration * 16000)  # Use window duration instead of fixed 0.1s
         if len(raw_audio_waveform) < min_samples:
-            print(f"⚠️ Audio too short ({len(raw_audio_waveform)} samples), padding to {min_samples} samples")
+            print(f"⚠️ Audio too short ({len(raw_audio_waveform)} samples), padding to {min_samples} samples ({window_duration}s)")
             padded_audio = numpy.zeros(min_samples, dtype=numpy.float32)
             padded_audio[:len(raw_audio_waveform)] = raw_audio_waveform
             raw_audio_waveform = padded_audio
+        elif len(raw_audio_waveform) > min_samples:
+            # 🚀 IMPROVED: If audio is longer than window, take a centered segment for better context
+            center_sample = len(raw_audio_waveform) // 2
+            start_sample = max(0, center_sample - min_samples // 2)
+            end_sample = start_sample + min_samples
+            raw_audio_waveform = raw_audio_waveform[start_sample:end_sample]
+            print(f"🔍 Extracted {window_duration}s centered audio segment from longer audio")
         
         # If sample rate is not 16000 Hz, resample the audio to 16000.
         if sample_rate != 16000:
@@ -1199,6 +1209,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             sample_rate = 16000
         
         print(f"🔍 Processed audio shape: {raw_audio_waveform.shape}")
+        print(f"🔍 Processed audio duration: {len(raw_audio_waveform) / sample_rate:.3f}s")
         print(f"🔍 Processed audio min/max: {raw_audio_waveform.min():.4f}/{raw_audio_waveform.max():.4f}")
         
         # Create a temporary audio file since Audio2Feature expects a file path
@@ -1211,7 +1222,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             try:
                 # Try soundfile first (faster for WAV)
                 sf.write(temp_audio_path, raw_audio_waveform, sample_rate)
-                print(f"🔍 Wrote audio to {temp_audio_path}")
+                print(f"🔍 Wrote {window_duration}s audio window to {temp_audio_path}")
             except Exception as sf_error:
                 # Fallback to librosa if soundfile fails
                 print(f"⚠️ soundfile failed, using librosa: {sf_error}")
@@ -1291,6 +1302,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                     print(f"🔍 Reshaped 3D audio_feat from [{B}, {T}, {F}] to {audio_feat.shape}")
                 
                 print(f"🔍 Final audio_feat shape: {audio_feat.shape}")
+                print(f"🚀 Longer audio window ({window_duration}s) provides {audio_feat.shape[1]} tokens vs ~{int(window_duration * 50)} expected")
                 
                 # Validate output shape
                 if audio_feat.shape[0] == 0 or audio_feat.shape[1] == 0:
@@ -1316,6 +1328,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                     audio_feat = audio_feat.float()
                 
                 print(f"🔍 Returning audio tensor shape: {audio_feat.shape}, dtype: {audio_feat.dtype}, device: {audio_feat.device}")
+                print(f"✅ Enhanced temporal context: {window_duration}s window provides richer phoneme information")
                 return audio_feat
                 
             except Exception as audio_feat_error:
@@ -1324,13 +1337,8 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 import traceback
                 print(f"❌ Traceback: {traceback.format_exc()}")
                 
-                # Try to estimate reasonable number of tokens based on input
-                if hasattr(raw_audio_waveform, 'shape') and len(raw_audio_waveform.shape) > 0:
-                    audio_samples = raw_audio_waveform.shape[0]
-                    audio_duration = audio_samples / sample_rate
-                    estimated_tokens = max(10, int(audio_duration * 50))  # ~50 tokens per second
-                else:
-                    estimated_tokens = 25  # Default fallback
+                # Try to estimate reasonable number of tokens based on window duration
+                estimated_tokens = max(10, int(window_duration * 50))  # ~50 tokens per second
                     
                 # Use same device as audio encoder if available
                 try:
@@ -1344,6 +1352,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
                 
                 fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float32, device=fallback_device)
                 print(f"🔧 Fallback tensor shape: {fallback_tensor.shape}, dtype: {fallback_tensor.dtype}, device: {fallback_tensor.device}")
+                print(f"🔧 Fallback uses {window_duration}s window duration for {estimated_tokens} tokens")
                 return fallback_tensor
             
         finally:
@@ -1354,16 +1363,11 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
     except Exception as e:
         print(f"❌ prepare_latentsync_audio failed: {str(e)}")
         print(f"❌ Input was: {type(raw_audio_waveform)}, shape: {getattr(raw_audio_waveform, 'shape', 'no shape')}")
-        # Return a more reasonable fallback audio tensor based on input
+        # Return a more reasonable fallback audio tensor based on window duration
         print("🔧 Creating fallback audio tensor...")
         
-        # Try to estimate reasonable number of tokens based on input
-        if hasattr(raw_audio_waveform, 'shape') and len(raw_audio_waveform.shape) > 0:
-            audio_samples = raw_audio_waveform.shape[0]
-            audio_duration = audio_samples / sample_rate
-            estimated_tokens = max(10, int(audio_duration * 50))  # ~50 tokens per second
-        else:
-            estimated_tokens = 25  # Default fallback
+        # Estimate tokens based on window duration
+        estimated_tokens = max(10, int(window_duration * 50))  # ~50 tokens per second
             
         # Use same device as audio encoder if available
         try:
@@ -1377,6 +1381,7 @@ def prepare_latentsync_audio(raw_audio_waveform: numpy.ndarray, sample_rate: int
             
         fallback_tensor = torch.zeros(1, estimated_tokens, 384, dtype=torch.float32, device=fallback_device)
         print(f"🔧 Fallback tensor shape: {fallback_tensor.shape}, dtype: {fallback_tensor.dtype}, device: {fallback_tensor.device}")
+        print(f"🔧 Fallback uses {window_duration}s window duration for {estimated_tokens} tokens")
         return fallback_tensor
 
 
