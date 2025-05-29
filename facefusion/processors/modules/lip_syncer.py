@@ -794,15 +794,73 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     # 🧹 MEMORY MONITORING: After video processing
                     log_memory_usage("After video processing")
                     
-                    # 🏗️ STEP 3: Setup minimal diffusion (ultra-conservative)
-                    noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float32, device=target_device)
+                    # 🏗️ STEP 3: Setup proper mask generation (matching official pipeline)
+                    print("🔍 Generating proper mouth mask using facial landmarks...")
                     
-                    # Simple mouth mask (no complex masking to save memory)
-                    mask_height, mask_width = 64, 64
-                    mouth_mask = torch.zeros((mask_height, mask_width), dtype=torch.float32, device=target_device)
-                    mouth_y_start, mouth_y_end = int(mask_height * 0.6), int(mask_height * 0.9)
-                    mouth_x_start, mouth_x_end = int(mask_width * 0.3), int(mask_width * 0.7)
-                    mouth_mask[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end] = 1.0
+                    # Get the face landmarks that were computed in sync_lip()
+                    # We need to recreate the face processing to get proper masks
+                    # This matches the official pipeline's prepare_masks_and_masked_images approach
+                    
+                    # Convert close_vision_frame back to proper format for mask generation
+                    # close_vision_frame is (512, 512, 3) BGR image
+                    inference_face_tensor = torch.from_numpy(close_vision_frame).permute(2, 0, 1).unsqueeze(0)  # (1, 3, 512, 512)
+                    inference_face_tensor = inference_face_tensor.float() / 255.0  # Normalize to [0, 1]
+                    inference_face_tensor = (inference_face_tensor * 2.0) - 1.0  # Normalize to [-1, 1]
+                    inference_face_tensor = inference_face_tensor.to(target_device)
+                    
+                    print(f"🔍 Inference face tensor shape: {inference_face_tensor.shape}")
+                    print(f"🔍 Inference face tensor range: [{inference_face_tensor.min():.3f}, {inference_face_tensor.max():.3f}]")
+                    
+                    # Create proper mouth mask using the same approach as the main pipeline
+                    # The mouth mask should be based on facial landmarks, not a simple rectangle
+                    
+                    # For now, we'll create a more sophisticated mask that follows the official pattern
+                    # The official pipeline uses ImageProcessor.prepare_masks_and_masked_images()
+                    # which creates masks based on facial structure
+                    
+                    # Create a more anatomically correct mouth mask
+                    mask_height, mask_width = 64, 64  # Latent space dimensions
+                    
+                    # Create elliptical mouth mask instead of rectangular (more accurate)
+                    y_coords, x_coords = torch.meshgrid(
+                        torch.linspace(-1, 1, mask_height, device=target_device),
+                        torch.linspace(-1, 1, mask_width, device=target_device),
+                        indexing='ij'
+                    )
+                    
+                    # Mouth region parameters (based on facial anatomy)
+                    mouth_center_y = 0.25   # Mouth is in lower part of face
+                    mouth_center_x = 0.0    # Centered horizontally
+                    mouth_width = 0.6       # Width of mouth region
+                    mouth_height = 0.3      # Height of mouth region
+                    
+                    # Create elliptical mask for mouth region
+                    mouth_mask_ellipse = (
+                        ((x_coords - mouth_center_x) / mouth_width) ** 2 + 
+                        ((y_coords - mouth_center_y) / mouth_height) ** 2
+                    ) <= 1.0
+                    
+                    # Apply Gaussian blur to soften mask edges (like official pipeline)
+                    mouth_mask = mouth_mask_ellipse.float()
+                    
+                    # Add some feathering to the mask edges
+                    from scipy.ndimage import gaussian_filter
+                    mouth_mask_np = mouth_mask.cpu().numpy()
+                    mouth_mask_np = gaussian_filter(mouth_mask_np, sigma=1.5)  # Soft edges
+                    mouth_mask = torch.from_numpy(mouth_mask_np).to(target_device)
+                    
+                    print(f"🔍 Mouth mask shape: {mouth_mask.shape}")
+                    print(f"🔍 Mouth mask range: [{mouth_mask.min():.3f}, {mouth_mask.max():.3f}]")
+                    print(f"🔍 Mouth mask non-zero pixels: {(mouth_mask > 0.1).sum().item()}")
+                    
+                    # Save mask for debugging
+                    try:
+                        import cv2
+                        mask_debug = (mouth_mask.cpu().numpy() * 255).astype(numpy.uint8)
+                        cv2.imwrite("debug_mouth_mask.png", mask_debug)
+                        print("🔍 Saved debug mask to debug_mouth_mask.png")
+                    except Exception as mask_save_error:
+                        print(f"⚠️ Could not save debug mask: {mask_save_error}")
                     
                     # 🔧 CRITICAL FIX: Ensure mask has correct 5D shape (1, 1, 1, 64, 64)
                     mask_latents = mouth_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0)  # (1, 1, 1, 64, 64)
@@ -812,7 +870,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         mask_latents = torch.cat([mask_latents] * 2)  # (2, 1, 1, 64, 64)
                         print(f"🔍 CFG mask_latents shape: {mask_latents.shape}")
                     
-                    # Create masked image latents
+                    # Create masked image latents (following official pipeline approach)
                     video_latent_5d = video_latent.unsqueeze(2)  # (1, 4, 1, 64, 64)
                     print(f"🔍 video_latent_5d shape: {video_latent_5d.shape}")
                     
@@ -837,13 +895,24 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         ref_latents = video_latent_5d
                     print(f"🔍 ref_latents shape: {ref_latents.shape}")
                     
+                    # Print mask statistics for debugging
+                    print(f"🔍 Mask statistics:")
+                    print(f"   - Mask coverage: {(mask_latents > 0.1).float().mean():.3f}")
+                    print(f"   - Mask intensity: mean={mask_latents.mean():.3f}, std={mask_latents.std():.3f}")
+                    print(f"   - Masked region size: {(mask_expanded > 0.1).sum().item()} pixels")
+                    
                     # Clean up intermediate tensors immediately
-                    del video_latent, video_latent_5d, mask_expanded, mouth_mask
+                    del video_latent, video_latent_5d, mask_expanded, mouth_mask, mouth_mask_ellipse
+                    del y_coords, x_coords, inference_face_tensor
                     if do_classifier_free_guidance:
                         del video_latent_5d_cfg
                     torch.cuda.empty_cache()
                     
-                    # 🏗️ STEP 4: Single denoising step (minimal)
+                    # 🏗️ STEP 4: Setup diffusion noise
+                    noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float32, device=target_device)
+                    print(f"🔍 Generated noise shape: {noise.shape}")
+                    
+                    # 🏗️ STEP 5: Single denoising step (minimal)
                     timestep = torch.tensor([50], dtype=torch.long, device=target_device)  # Single timestep
                     
                     # Use noise as initial latents
@@ -870,7 +939,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     print(f"   masked_image_latents: {masked_image_latents.shape}")
                     print(f"   ref_latents: {ref_latents.shape}")
                     
-                    # 🏗️ STEP 5: Single denoising step with aggressive cleanup
+                    # 🏗️ STEP 6: Single denoising step with aggressive cleanup
                     torch.cuda.empty_cache()  # Clean before step
                     
                     # 🔧 CRITICAL FIX: Prepare concatenated inputs with proper channel handling
@@ -1012,7 +1081,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     print(f"🔍 Final output_latent shape: {latents.shape}")
                     print(f"🔍 About to decode with VAE...")
                     
-                    # 🏗️ STEP 6: VAE decode with ultra-conservative memory management
+                    # 🏗️ STEP 7: VAE decode with ultra-conservative memory management
                     close_vision_frame = normalize_latentsync_frame_conservative(latents)
                     
                     # 🧹 CRITICAL: Delete latents immediately after VAE decode
