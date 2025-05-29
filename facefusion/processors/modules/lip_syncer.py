@@ -746,8 +746,8 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         print("🚀 CFG enabled: using guidance scale 1.5 with 5 denoising steps")
                     else:
                         guidance_scale = 1.0
-                        num_inference_steps = 3  # Increased from 1 for better quality
-                        print("🔧 CFG disabled: using 3 denoising steps for improved quality")
+                        num_inference_steps = 15  # Increased from 1 for better quality
+                        print("🔧 CFG disabled: using 15 denoising steps for improved quality")
                     
                     do_classifier_free_guidance = guidance_scale > 1.0
                     
