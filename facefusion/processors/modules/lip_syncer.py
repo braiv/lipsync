@@ -871,7 +871,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     # ONNX inference with FP32 (matching ONNX model precision)
                     noise_pred = lip_syncer.run(None, {
                         'sample': concatenated_latents.cpu().numpy().astype(numpy.float32),  # FP32
-                        'timesteps': numpy.array([timestep.cpu().numpy()], dtype=numpy.int64),
+                        'timesteps': timestep.cpu().numpy().astype(numpy.int64),  # 🔧 FIX: Use 1D array, not 2D
                         'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float32)  # FP32
                     })[0]
                     
