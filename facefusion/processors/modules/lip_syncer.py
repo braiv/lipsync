@@ -60,13 +60,54 @@ except ImportError:
     Audio2Feature = None
     LATENTSYNC_AVAILABLE = False
 
+# Global variables for model caching
+audio_encoder = None
+vae = None
+
+# 🧹 MEMORY MONITORING FUNCTION
+def log_memory_usage(stage: str = ""):
+    """Log current GPU memory usage for debugging memory leaks."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"💾 {stage} - GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+        
+        # Warning for high memory usage
+        if allocated > 20.0:  # More than 20GB
+            print(f"⚠️ HIGH MEMORY USAGE DETECTED: {allocated:.2f}GB")
+        elif allocated > 15.0:  # More than 15GB
+            print(f"⚠️ Elevated memory usage: {allocated:.2f}GB")
+    else:
+        print(f"💾 {stage} - CUDA not available")
+
+# CFG toggle flag (global state)
+ENABLE_CFG = False  # Default: disabled for memory efficiency
+
+def toggle_cfg(enable: bool = None) -> bool:
+    """
+    Toggle CFG (Classifier-Free Guidance) on/off.
+    
+    Args:
+        enable: True to enable CFG, False to disable, None to toggle current state
+    
+    Returns:
+        Current CFG state after toggle
+    """
+    global ENABLE_CFG
+    if enable is None:
+        ENABLE_CFG = not ENABLE_CFG
+    else:
+        ENABLE_CFG = enable
+    
+    status = "enabled" if ENABLE_CFG else "disabled"
+    memory_impact = "higher quality, more memory" if ENABLE_CFG else "lower memory, faster"
+    print(f"🔧 CFG {status} ({memory_impact})")
+    return ENABLE_CFG
+
 # 🧹 MEMORY OPTIMIZATION: Lazy model loading to prevent OOM
 # Only load models when needed, not at import time
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Global model variables (loaded lazily)
-audio_encoder = None
-vae = None
 projection_weight = None
 
 def reset_models_to_device(target_device="cuda"):
@@ -571,6 +612,9 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
     print(f"🔍 Forward function called with model: {model_name}")
     print(f"🔍 Input close_vision_frame shape: {close_vision_frame.shape}")
     print(f"🔍 Input close_vision_frame dtype: {close_vision_frame.dtype}")
+    
+    # 🧹 MEMORY MONITORING: Initial state
+    log_memory_usage("Forward function start")
 
     # 🔥 CRITICAL: Smart device selection based on available memory
     if torch.cuda.is_available() and model_name == 'latentsync':
@@ -695,29 +739,15 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     
                     print(f"✅ All models confirmed on {target_device}")
                     
-                    # 💾 Memory-aware processing settings
-                    if target_device == "cpu":
-                        # CPU settings: minimal steps, no CFG
-                        guidance_scale = 1.0  # Disable CFG for CPU
-                        num_inference_steps = 1  # Single step for CPU
-                        print("🔧 Using CPU-optimized settings: no CFG, single step")
+                    # 🔧 CFG TOGGLE: Simple enable/disable based on global flag
+                    if ENABLE_CFG:
+                        guidance_scale = 1.5
+                        num_inference_steps = 3
+                        print("🚀 CFG enabled: using guidance scale 1.5")
                     else:
-                        # GPU settings: check available memory for appropriate settings
-                        available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-                        available_gb = available_memory / 1024**3
-                        
-                        if available_gb >= 10.0:
-                            guidance_scale = 1.5
-                            num_inference_steps = 5
-                            print("🚀 High memory: using enhanced settings")
-                        elif available_gb >= 8.0:
-                            guidance_scale = 1.2
-                            num_inference_steps = 3
-                            print("🔧 Medium memory: using balanced settings")
-                        else:
-                            guidance_scale = 1.0
-                            num_inference_steps = 1
-                            print("⚠️ Low memory: using minimal settings")
+                        guidance_scale = 1.0
+                        num_inference_steps = 1
+                        print("🔧 CFG disabled: no guidance (memory optimized)")
                     
                     do_classifier_free_guidance = guidance_scale > 1.0
                     
@@ -745,7 +775,10 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                             print(f"🔍 CFG Audio tensor shape: {audio_tensor.shape}")
                             del null_audio_embeds
                             torch.cuda.empty_cache()
-                                         
+                    
+                    # 🧹 MEMORY MONITORING: After audio processing
+                    log_memory_usage("After audio processing")
+                    
                     # 🏗️ STEP 2: Prepare video with VAE cleanup
                     video_latent = prepare_latentsync_frame(close_vision_frame)
                     print(f"🔍 Video latent device: {video_latent.device}")
@@ -757,6 +790,9 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     
                     # 🧹 Clear cache after VAE encoding (keep VAE on target device for consistency)
                     torch.cuda.empty_cache()
+                    
+                    # 🧹 MEMORY MONITORING: After video processing
+                    log_memory_usage("After video processing")
                     
                     # 🏗️ STEP 3: Setup minimal diffusion (ultra-conservative)
                     noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float32, device=target_device)
@@ -889,14 +925,89 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
                     
-                    # Simple denoising step (without scheduler for simplicity)
-                    latents = latents - 0.1 * noise_pred  # Simple update
+                    # 🔧 PROPER MULTI-STEP DENOISING: Use num_inference_steps
+                    print(f"🔍 Performing {num_inference_steps} denoising steps...")
+                    step_size = 0.1 / num_inference_steps  # Adaptive step size based on num_steps
                     
+                    for step in range(num_inference_steps):
+                        # Apply denoising step
+                        latents = latents - step_size * noise_pred
+                        print(f"🔍 Completed denoising step {step + 1}/{num_inference_steps}")
+                        
+                        # 🧹 AGGRESSIVE MEMORY CLEANUP after each step
+                        torch.cuda.empty_cache()
+                        
+                        # For multi-step: re-run UNet for next step (except on last step)
+                        if step < num_inference_steps - 1 and num_inference_steps > 1:
+                            # Prepare inputs for next step
+                            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                            
+                            # Concatenate all inputs for UNet
+                            concatenated_latents_next = torch.cat(
+                                [latent_model_input, mask_input, masked_image_latents, ref_latents], 
+                                dim=1
+                            )
+                            
+                            # Run UNet again for next step
+                            noise_pred_new = lip_syncer.run(None, {
+                                'sample': concatenated_latents_next.cpu().numpy().astype(numpy.float32),
+                                'timesteps': timestep.cpu().numpy().astype(numpy.int64),
+                                'encoder_hidden_states': audio_tensor.cpu().numpy().astype(numpy.float32)
+                            })[0]
+                            
+                            # 🧹 CRITICAL: Delete old noise_pred before creating new one
+                            del noise_pred
+                            torch.cuda.empty_cache()
+                            
+                            noise_pred = torch.from_numpy(noise_pred_new).to(target_device, dtype=torch.float32)
+                            
+                            # 🧹 CRITICAL: Delete intermediate tensors immediately
+                            del noise_pred_new, latent_model_input, concatenated_latents_next
+                            torch.cuda.empty_cache()
+                            
+                            # Apply CFG if enabled
+                            if do_classifier_free_guidance:
+                                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                                # 🧹 CRITICAL: Delete old noise_pred before reassigning
+                                del noise_pred
+                                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                                del noise_pred_uncond, noise_pred_text
+                                torch.cuda.empty_cache()
+                    
+                    # 🧹 FINAL CLEANUP: Delete noise_pred after all steps
+                    del noise_pred
+                    torch.cuda.empty_cache()
+                    
+                    print(f"✅ Completed all {num_inference_steps} denoising steps")
                     print(f"🔍 Final latents shape: {latents.shape}")
                     
-                    # Clean up all remaining tensors before VAE decode
-                    del audio_tensor, mask_input, masked_image_latents, ref_latents, noise_pred, concatenated_latents
+                    # 🧹 AGGRESSIVE CLEANUP: Clean up all remaining tensors before VAE decode
+                    try:
+                        del audio_tensor
+                    except:
+                        pass
+                    try:
+                        del mask_input
+                    except:
+                        pass
+                    try:
+                        del masked_image_latents
+                    except:
+                        pass
+                    try:
+                        del ref_latents
+                    except:
+                        pass
+                    try:
+                        del concatenated_latents
+                    except:
+                        pass
+                    
+                    # 🧹 CRITICAL: Force garbage collection and empty cache
+                    import gc
+                    gc.collect()
                     torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
                     
                     print(f"🔍 Final output_latent shape: {latents.shape}")
                     print(f"🔍 About to decode with VAE...")
@@ -904,19 +1015,35 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     # 🏗️ STEP 6: VAE decode with ultra-conservative memory management
                     close_vision_frame = normalize_latentsync_frame_conservative(latents)
                     
+                    # 🧹 CRITICAL: Delete latents immediately after VAE decode
+                    del latents
+                    torch.cuda.empty_cache()
+                    
                     print("🔍 Model output shape:", close_vision_frame.shape if close_vision_frame is not None else "None")
                     
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     logger.error(f"❌ OOM during LatentSync processing! Memory is critically low.", __name__)
+                    # 🧹 AGGRESSIVE CLEANUP before OOM return
                     torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    import gc
+                    gc.collect()
                     # Return original frame as last resort
                     return close_vision_frame
                 else:
                     logger.error(f"LatentSync processing failed: {str(e)}", __name__)
+                    # 🧹 AGGRESSIVE CLEANUP before error return
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
                     return close_vision_frame
             except Exception as e:
                 logger.error(f"LatentSync processing failed: {str(e)}", __name__)
+                # 🧹 AGGRESSIVE CLEANUP before exception return
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
                 return close_vision_frame
         else:
             # Wav2Lip-style direct inference
@@ -931,6 +1058,18 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
             print(f"🔍 Wav2Lip raw output shape: {close_vision_frame.shape}")
             close_vision_frame = normalize_close_frame(close_vision_frame)
             print(f"🔍 Wav2Lip normalized output shape: {close_vision_frame.shape}")
+
+    # 🧹 FINAL AGGRESSIVE CLEANUP before successful return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        # Log final memory state
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        print(f"💾 Final GPU memory after forward(): {allocated:.2f} GB")
 
     return close_vision_frame
 
