@@ -777,20 +777,27 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     mask_expanded = mask_latents.repeat(1, 4, 1, 1, 1)  # (1, 4, 1, 64, 64) or (2, 4, 1, 64, 64)
                     print(f"🔍 mask_expanded shape: {mask_expanded.shape}")
                     
-                    masked_image_latents = video_latent_5d * (1 - mask_expanded)
-                    print(f"🔍 masked_image_latents shape: {masked_image_latents.shape}")
-                    
+                    # 🔧 CRITICAL FIX: Handle CFG properly - don't double-apply
                     if do_classifier_free_guidance:
-                        masked_image_latents = torch.cat([masked_image_latents] * 2)
-                        print(f"🔍 CFG masked_image_latents shape: {masked_image_latents.shape}")
+                        # video_latent_5d needs to be duplicated for CFG
+                        video_latent_5d_cfg = torch.cat([video_latent_5d] * 2)  # (2, 4, 1, 64, 64)
+                        masked_image_latents = video_latent_5d_cfg * (1 - mask_expanded)
+                        print(f"🔍 masked_image_latents shape (with CFG): {masked_image_latents.shape}")
+                    else:
+                        masked_image_latents = video_latent_5d * (1 - mask_expanded)
+                        print(f"🔍 masked_image_latents shape (no CFG): {masked_image_latents.shape}")
                     
-                    ref_latents = video_latent_5d
+                    # 🔧 CRITICAL FIX: Handle ref_latents CFG properly
                     if do_classifier_free_guidance:
-                        ref_latents = torch.cat([ref_latents] * 2)
+                        ref_latents = torch.cat([video_latent_5d] * 2)  # (2, 4, 1, 64, 64)
+                    else:
+                        ref_latents = video_latent_5d
                     print(f"🔍 ref_latents shape: {ref_latents.shape}")
                     
                     # Clean up intermediate tensors immediately
                     del video_latent, video_latent_5d, mask_expanded, mouth_mask
+                    if do_classifier_free_guidance:
+                        del video_latent_5d_cfg
                     torch.cuda.empty_cache()
                     
                     # 🏗️ STEP 4: Single denoising step (minimal)
