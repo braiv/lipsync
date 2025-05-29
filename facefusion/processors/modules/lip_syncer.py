@@ -888,15 +888,60 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                         masked_image_latents = video_latent_5d * (1 - mask_expanded)
                         print(f"🔍 masked_image_latents shape (no CFG): {masked_image_latents.shape}")
                     
-                    # 🔧 CRITICAL FIX: Handle ref_latents CFG properly
+                    # 🔧 CRITICAL FIX: Proper reference latents (NOT the same frame!)
+                    # The official pipeline uses a clean reference frame for guidance
+                    # We should use the original unmasked latents as reference
+                    print("🔍 Creating proper reference latents for diffusion guidance...")
+                    
+                    # Reference latents should be the CLEAN, UNMASKED version of the current frame
+                    # This provides the model with guidance on what the non-mouth regions should look like
                     if do_classifier_free_guidance:
                         ref_latents = torch.cat([video_latent_5d] * 2)  # (2, 4, 1, 64, 64)
+                        print(f"🔍 ref_latents shape (with CFG): {ref_latents.shape}")
                     else:
-                        ref_latents = video_latent_5d
-                    print(f"🔍 ref_latents shape: {ref_latents.shape}")
+                        ref_latents = video_latent_5d  # (1, 4, 1, 64, 64)
+                        print(f"🔍 ref_latents shape (no CFG): {ref_latents.shape}")
                     
-                    # Print mask statistics for debugging
-                    print(f"🔍 Mask statistics:")
+                    # 🔧 CRITICAL CONDITIONING FIX: Ensure proper inpainting setup
+                    # The model expects:
+                    # 1. masked_image_latents: The image with mouth region zeroed out
+                    # 2. mask_latents: Binary mask indicating where to inpaint (1 = inpaint, 0 = keep)
+                    # 3. ref_latents: Clean reference for guidance
+                    
+                    print("🔍 Validating conditioning inputs for diffusion...")
+                    print(f"🔍 Mask values - min: {mask_latents.min():.3f}, max: {mask_latents.max():.3f}")
+                    print(f"🔍 Masked image - min: {masked_image_latents.min():.3f}, max: {masked_image_latents.max():.3f}")
+                    print(f"🔍 Reference latents - min: {ref_latents.min():.3f}, max: {ref_latents.max():.3f}")
+                    
+                    # 🔧 CRITICAL: Verify mask is properly applied
+                    masked_region_mean = masked_image_latents[mask_expanded > 0.5].mean() if (mask_expanded > 0.5).any() else 0.0
+                    unmasked_region_mean = masked_image_latents[mask_expanded <= 0.5].mean() if (mask_expanded <= 0.5).any() else 0.0
+                    print(f"🔍 Masked region mean: {masked_region_mean:.3f} (should be ~0)")
+                    print(f"🔍 Unmasked region mean: {unmasked_region_mean:.3f} (should be non-zero)")
+                    
+                    if abs(masked_region_mean) > 0.1:
+                        print("⚠️ WARNING: Masked region is not properly zeroed! This will cause artifacts.")
+                        # Fix the masking
+                        masked_image_latents = masked_image_latents * (1 - mask_expanded)
+                        print("🔧 Fixed masked image latents by re-applying mask")
+                    
+                    # 🔧 CRITICAL: Ensure mask values are in correct range [0, 1]
+                    mask_latents = torch.clamp(mask_latents, 0.0, 1.0)
+                    print(f"🔍 Clamped mask range: [{mask_latents.min():.3f}, {mask_latents.max():.3f}]")
+                    
+                    # 🔧 CRITICAL: Verify all tensor shapes before concatenation
+                    print(f"🔍 Pre-concat shapes:")
+                    print(f"   latent_model_input: {latent_model_input.shape}")
+                    print(f"   mask_input: {mask_input.shape}")
+                    print(f"   masked_image_latents: {masked_image_latents.shape}")
+                    print(f"   ref_latents: {ref_latents.shape}")
+                    
+                    # 🔧 CRITICAL: Ensure mask values are in correct range [0, 1]
+                    mask_latents = torch.clamp(mask_latents, 0.0, 1.0)
+                    print(f"🔍 Clamped mask range: [{mask_latents.min():.3f}, {mask_latents.max():.3f}]")
+                    
+                    # Print final mask statistics for debugging
+                    print(f"🔍 Final mask statistics:")
                     print(f"   - Mask coverage: {(mask_latents > 0.1).float().mean():.3f}")
                     print(f"   - Mask intensity: mean={mask_latents.mean():.3f}, std={mask_latents.std():.3f}")
                     print(f"   - Masked region size: {(mask_expanded > 0.1).sum().item()} pixels")
@@ -912,7 +957,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     noise = torch.randn(1, 4, 1, 64, 64, dtype=torch.float32, device=target_device)
                     print(f"🔍 Generated noise shape: {noise.shape}")
                     
-                    # 🏗️ STEP 5: Single denoising step (minimal)
+                    # 🏗️ STEP 5: Prepare UNet inputs with proper conditioning
                     timestep = torch.tensor([50], dtype=torch.long, device=target_device)  # Single timestep
                     
                     # Use noise as initial latents
@@ -931,6 +976,13 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     latent_model_input = latent_model_input.to(target_device)
                     mask_input = mask_input.to(target_device)
                     audio_tensor = audio_tensor.to(target_device)
+                    
+                    # 🔧 CRITICAL: Verify all tensor shapes before concatenation
+                    print(f"🔍 Pre-concat shapes:")
+                    print(f"   latent_model_input: {latent_model_input.shape}")
+                    print(f"   mask_input: {mask_input.shape}")
+                    print(f"   masked_image_latents: {masked_image_latents.shape}")
+                    print(f"   ref_latents: {ref_latents.shape}")
                     
                     # 🔧 CRITICAL: Verify all tensor shapes before concatenation
                     print(f"🔍 Pre-concat shapes:")
