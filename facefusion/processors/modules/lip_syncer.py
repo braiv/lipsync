@@ -952,7 +952,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame) -> Vi
                     print(f"🔍 Generated noise shape: {noise.shape}")
                     
                     # 🏗️ STEP 5: Prepare UNet inputs with proper conditioning
-                    timestep = torch.tensor([50], dtype=torch.long, device=target_device)  # Single timestep
+                    timestep = torch.tensor([10], dtype=torch.long, device=target_device)  # Single timestep
                     
                     # Use noise as initial latents
                     latents = noise
