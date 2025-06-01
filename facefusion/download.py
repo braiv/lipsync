@@ -64,8 +64,12 @@ def ping_static_url(url : str) -> bool:
 
 
 def conditional_download_hashes(hashes : DownloadSet) -> bool:
-	# Extract all file paths from the hashes dictionary
-	hash_paths = [ hashes.get(hash_key).get('path') for hash_key in hashes.keys() ]
+	# Extract all file paths from the hashes dictionary, filtering out None values
+	hash_paths = [ hashes.get(hash_key).get('path') for hash_key in hashes.keys() if hashes.get(hash_key).get('path') is not None ]
+
+	# If no valid paths (e.g., LatentSync with None paths), return True
+	if not hash_paths:
+		return True
 
 	# Signal that the validation process is starting (used for logging/progress)
 	process_manager.check()
@@ -112,8 +116,12 @@ def conditional_download_hashes(hashes : DownloadSet) -> bool:
 
 
 def conditional_download_sources(sources : DownloadSet) -> bool:
-	# Extract all the file paths from the source dictionary
-	source_paths = [ sources.get(source_key).get('path') for source_key in sources.keys() ]
+	# Extract all the file paths from the source dictionary, filtering out None values
+	source_paths = [ sources.get(source_key).get('path') for source_key in sources.keys() if sources.get(source_key).get('path') is not None ]
+
+	# If no valid paths (e.g., LatentSync with None paths), return True
+	if not source_paths:
+		return True
 
 	# Signal that the process is starting (used for logging or UI updates)
 	process_manager.check()
