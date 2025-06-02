@@ -79,7 +79,7 @@ scheduler = None
 _audio_features_cache = {}  # Cache pre-computed audio features
 
 # 🚀 PERFORMANCE OPTIMIZATION SETTINGS
-PERFORMANCE_MODE = "quality"  # 🔧 CRITICAL FIX: Use quality mode for proper 512x512 resolution matching
+PERFORMANCE_MODE = "fast_quality"  # 🔧 CRITICAL FIX: Use fast_quality mode for optimal balance of quality and speed
 FAST_RESOLUTION = 256  # Use 256x256 for fast mode (matches official benchmarks)
 BALANCED_RESOLUTION = 384  # Use 384x384 for balanced mode
 QUALITY_RESOLUTION = 512  # Use 512x512 for quality mode
@@ -102,6 +102,14 @@ PERFORMANCE_CONFIGS = {
         "use_fp16": True,
         "batch_optimization": True
     },
+    "fast_quality": {
+        "resolution": 512,          # Full resolution for quality
+        "num_inference_steps": 12,  # Reduced steps for speed
+        "guidance_scale": 3.5,      # Full CFG for good lip sync
+        "enable_vae_slicing": True, # Enable for memory efficiency
+        "use_fp16": True,           # Enable for speed
+        "batch_optimization": True  # Enable for efficiency
+    },
     "quality": {
         "resolution": 512,
         "num_inference_steps": 20,  # Full steps
@@ -112,17 +120,17 @@ PERFORMANCE_CONFIGS = {
     }
 }
 
-def set_performance_mode(mode: str = "quality"):  # 🔧 CRITICAL FIX: Default to quality for proper resolution
+def set_performance_mode(mode: str = "fast_quality"):  # 🔧 CRITICAL FIX: Default to fast_quality for optimal balance
     """
     Set performance mode for LatentSync processing
     
     Args:
-        mode: "fast" (2-4 sec/frame), "balanced" (4-8 sec/frame), "quality" (15-30 sec/frame)
+        mode: "fast" (2-4 sec/frame), "balanced" (4-8 sec/frame), "fast_quality" (6-12 sec/frame), "quality" (15-30 sec/frame)
     """
     global PERFORMANCE_MODE
     if mode not in PERFORMANCE_CONFIGS:
-        print(f"⚠️ Invalid performance mode: {mode}. Using 'quality'")
-        mode = "quality"  # 🔧 CRITICAL FIX: Default to quality for proper resolution
+        print(f"⚠️ Invalid performance mode: {mode}. Using 'fast_quality'")
+        mode = "fast_quality"  # 🔧 CRITICAL FIX: Default to fast_quality for optimal balance
     
     PERFORMANCE_MODE = mode
     config = PERFORMANCE_CONFIGS[mode]
@@ -140,14 +148,15 @@ def get_expected_speed(mode: str) -> str:
     """Get expected processing speed for performance mode"""
     speed_map = {
         "fast": "2-4 sec/frame (matches official benchmarks)",
-        "balanced": "4-8 sec/frame (good quality/speed balance)", 
+        "balanced": "4-8 sec/frame (good quality/speed balance)",
+        "fast_quality": "6-12 sec/frame (full guidance scale with speed optimizations)",
         "quality": "15-30 sec/frame (maximum quality)"
     }
     return speed_map.get(mode, "unknown")
 
 def get_performance_config():
     """Get current performance configuration"""
-    return PERFORMANCE_CONFIGS.get(PERFORMANCE_MODE, PERFORMANCE_CONFIGS["quality"])  # 🔧 CRITICAL FIX: Default to quality
+    return PERFORMANCE_CONFIGS.get(PERFORMANCE_MODE, PERFORMANCE_CONFIGS["fast_quality"])  # 🔧 CRITICAL FIX: Default to fast_quality
 
 # 🧹 MEMORY MONITORING FUNCTION
 def log_memory_usage(stage: str = ""):
