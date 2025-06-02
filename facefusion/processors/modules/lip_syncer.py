@@ -1157,6 +1157,8 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 			print(f"   - Pre-computed features once (efficient)")
 			print(f"   - Created {len(audio_chunks)} small audio slices")
 			print(f"   - Memory per slice: ~{audio_chunks[0].numel() * 4 / 1024:.1f} KB (TINY!)")
+			print(f"   - Total video frames to process: {total_frames}")
+			print(f"   - Audio chunks available: {len(audio_chunks)}")
 		except Exception as e:
 			print(f"❌ Official audio processing failed: {e}")
 			print(f"🔧 Will fall back to old method per frame")
@@ -1166,6 +1168,12 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 		print(f"   - model_name == 'latentsync': {model_name == 'latentsync'}")
 		print(f"   - source_audio_path exists: {source_audio_path is not None}")
 
+	# 🔧 CRITICAL FIX: Create frame number to index mapping
+	frame_to_index = {}
+	for idx, queue_payload in enumerate(queue_payloads):
+		frame_number = queue_payload.get('frame_number')
+		frame_to_index[frame_number] = idx
+
 	for queue_payload in process_manager.manage(queue_payloads):
 		frame_number = queue_payload.get('frame_number')
 		target_vision_path = queue_payload.get('frame_path')
@@ -1173,22 +1181,28 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 		# Get appropriate audio frame based on model
 		if model_name == 'latentsync':
 			if audio_chunks is not None:
-				# 🔧 OFFICIAL: Use pre-computed small audio slices
-				if frame_number < len(audio_chunks):
-					source_audio_frame = audio_chunks[frame_number]
-					print(f"🔍 Frame {frame_number}: Using official audio slice {source_audio_frame.shape}")
+				# 🔧 CRITICAL FIX: Use frame index instead of frame number
+				frame_index = frame_to_index.get(frame_number, 0)
+				
+				if frame_index < len(audio_chunks):
+					source_audio_frame = audio_chunks[frame_index]
+					# Only log occasionally to avoid spam
+					if frame_index % 100 == 0 or frame_index < 5:
+						print(f"🔍 Frame {frame_number} (index {frame_index}): Using official audio slice {source_audio_frame.shape}")
 				else:
 					# Create small dummy slice if beyond audio length
 					source_audio_frame = torch.zeros(10, 384)  # Official LatentSync slice size
-					print(f"🔍 Frame {frame_number}: Using dummy audio slice (beyond audio length)")
+					print(f"🔍 Frame {frame_number} (index {frame_index}): Using dummy audio slice (beyond audio length)")
 			else:
 				# Fallback to old method if official method failed
 				print(f"⚠️ Falling back to old audio processing for frame {frame_number}")
+				
 				source_audio_frame = get_raw_audio_frame(source_audio_path, temp_video_fps, frame_number)
 			
 			if source_audio_frame is None or (isinstance(source_audio_frame, numpy.ndarray) and not numpy.any(source_audio_frame)):
 				# Create small empty slice for LatentSync
 				source_audio_frame = torch.zeros(10, 384)  # Official LatentSync slice size
+		
 		else:
 			source_audio_frame = get_voice_frame(source_audio_path, temp_video_fps, frame_number)
 			if not numpy.any(source_audio_frame):
@@ -1799,9 +1813,6 @@ def get_sliced_audio_feature(feature_array: torch.Tensor, vid_idx: int, fps: flo
     if center_idx >= length:
         # If beyond audio length, use the last valid audio frame
         center_idx = max(0, length - 1)
-        print(f"🔍 Frame {vid_idx}: Using last audio frame (center_idx: {center_idx}, audio_length: {length})")
-    else:
-        print(f"🔍 Frame {vid_idx}: Using official audio slice torch.Size([50, 384]) (center_idx: {center_idx})")
     
     # Calculate window bounds
     left_idx = center_idx - audio_feat_length[0] * 2
@@ -1846,6 +1857,25 @@ def create_audio_chunks_official(audio_path: str, fps: float, total_frames: int)
     # Step 1: Pre-compute features once (efficient)
     audio_features = precompute_audio_features(audio_path)
     
+    # 🔧 CRITICAL ANALYSIS: Calculate audio coverage
+    audio_fps = 50.0  # Whisper's internal rate (50Hz)
+    audio_length_in_frames = len(audio_features)
+    video_length_in_audio_frames = int(total_frames * audio_fps / fps)
+    audio_duration_seconds = audio_length_in_frames / audio_fps
+    video_duration_seconds = total_frames / fps
+    
+    print(f"🔧 Audio Analysis:")
+    print(f"   - Audio features length: {audio_length_in_frames} frames")
+    print(f"   - Audio duration: {audio_duration_seconds:.2f} seconds")
+    print(f"   - Video duration: {video_duration_seconds:.2f} seconds")
+    print(f"   - Video needs {video_length_in_audio_frames} audio frames")
+    print(f"   - Audio coverage: {audio_length_in_frames >= video_length_in_audio_frames} ({audio_length_in_frames}/{video_length_in_audio_frames})")
+    
+    if audio_length_in_frames < video_length_in_audio_frames:
+        shortage = video_length_in_audio_frames - audio_length_in_frames
+        print(f"⚠️ Audio is {shortage} frames short ({shortage/audio_fps:.2f} seconds)")
+        print(f"   - Frames {audio_length_in_frames}-{video_length_in_audio_frames-1} will use padding")
+    
     # Step 2: Create small slices per frame (memory efficient)
     whisper_chunks = []
     for frame_idx in range(total_frames):
@@ -1854,7 +1884,7 @@ def create_audio_chunks_official(audio_path: str, fps: float, total_frames: int)
     
     print(f"✅ Created {len(whisper_chunks)} audio chunks")
     print(f"   - Each chunk shape: {whisper_chunks[0].shape if whisper_chunks else 'N/A'}")
-    print(f"   - Memory per chunk: ~{whisper_chunks[0].numel() * 4 / 1024:.1f} KB (vs 5.7GB before!)")
+    print(f"   - Memory per chunk: ~{whisper_chunks[0].numel() * 4 / 1024:.1f} KB (TINY!)")
     
     return whisper_chunks
 
