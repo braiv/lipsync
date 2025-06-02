@@ -565,17 +565,20 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
     model_name = state_manager.get_item('lip_syncer_model')
     
     if model_name == 'latentsync':
-        # Use the official LatentSync pipeline we implemented
-        # Convert AudioFrame to raw audio format expected by process_frame_latentsync
-        if isinstance(temp_audio_frame, numpy.ndarray):
-            # temp_audio_frame is already in the right format
-            raw_audio = temp_audio_frame
+        # 🔧 CRITICAL FIX: Handle pre-computed audio slices properly
+        if isinstance(temp_audio_frame, torch.Tensor) and temp_audio_frame.dim() == 2 and temp_audio_frame.shape[1] == 384:
+            # This is a pre-computed audio slice from the official method - pass it directly
+            print(f"✅ Forward: Using pre-computed audio slice {temp_audio_frame.shape}")
+            audio_input = temp_audio_frame
+        elif isinstance(temp_audio_frame, numpy.ndarray):
+            # This is raw audio - convert to tensor but keep as raw audio
+            audio_input = temp_audio_frame
         else:
             # Convert from AudioFrame format to raw audio
-            raw_audio = temp_audio_frame.flatten() if hasattr(temp_audio_frame, 'flatten') else temp_audio_frame
+            audio_input = temp_audio_frame.flatten() if hasattr(temp_audio_frame, 'flatten') else temp_audio_frame
         
-        # Pass the actual target_face to process_frame_latentsync for proper mask creation
-        return process_frame_latentsync(target_face, close_vision_frame, raw_audio)
+        # Pass the audio input to process_frame_latentsync for proper handling
+        return process_frame_latentsync(target_face, close_vision_frame, audio_input)
     
     else:
         # For other models (like Wav2Lip), use ONNX inference
@@ -660,7 +663,7 @@ def get_reference_frame(source_face : Face, target_face : Face, temp_vision_fram
 	pass
 
 
-def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio_chunk: numpy.ndarray) -> VisionFrame:
+def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio_chunk) -> VisionFrame:
     """
     Process a single frame using the official LatentSync pipeline
     """
@@ -698,59 +701,69 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
             
             # 4. Process audio and image in proper scope
             with torch.no_grad():
-                # Process audio to get embeddings
+                # 🔧 CRITICAL FIX: Handle both pre-computed slices and raw audio
                 print("🎵 Processing audio...")
-                if len(audio_chunk.shape) == 1:
-                    audio_chunk = audio_chunk[None, :]
                 
-                # 🔧 CRITICAL FIX: Ensure audio chunk is reasonable size for single frame
-                # LatentSync should process ~1 second of audio per frame, not entire file
-                max_audio_samples = 16000 * 2  # 2 seconds max for single frame
-                if audio_chunk.shape[-1] > max_audio_samples:
-                    print(f"⚠️ Audio chunk too large: {audio_chunk.shape} samples")
-                    print(f"🔧 Truncating to {max_audio_samples} samples for memory efficiency")
-                    audio_chunk = audio_chunk[:, :max_audio_samples]
-                
-                # 🔧 MEMORY SAFETY: Pre-check audio size to prevent OOM in audio encoder
-                audio_duration = audio_chunk.shape[-1] / 16000  # Duration in seconds
-                estimated_memory_gb = audio_duration * 2.0  # Rough estimate: 2GB per second of audio
-                
-                if estimated_memory_gb > 4.0:  # If estimated > 4GB, use dummy embeddings
-                    print(f"⚠️ Audio too large for encoding (estimated {estimated_memory_gb:.1f}GB)")
-                    print("🔧 Using dummy embeddings to prevent OOM")
-                    
-                    # Create safe dummy embeddings
-                    batch_size = 1
-                    seq_len = 77  # Standard sequence length
-                    embed_dim = 384  # Whisper Tiny embedding dimension
-                    audio_embeds = torch.zeros(batch_size, seq_len, embed_dim, device=target_device)
-                
+                if isinstance(audio_chunk, torch.Tensor) and audio_chunk.dim() == 2 and audio_chunk.shape[1] == 384:
+                    # This is a pre-computed audio slice - use directly
+                    print(f"✅ Using pre-computed audio slice: {audio_chunk.shape}")
+                    audio_embeds = encode_audio_for_latentsync(audio_chunk)
                 else:
-                    # Convert to tensor and get audio features
-                    audio_tensor = torch.from_numpy(audio_chunk).float().to(target_device)
+                    # This is raw audio - process through fallback path
+                    print("⚠️ Processing raw audio through fallback path")
+                    if isinstance(audio_chunk, torch.Tensor):
+                        audio_chunk = audio_chunk.cpu().numpy()
                     
-                    # 🔧 SAFE AUDIO ENCODING: Try encoding with OOM protection
-                    try:
-                        # Get audio embeddings (matching official whisper processing)
-                        audio_embeds = encode_audio_for_latentsync(audio_tensor)
-                        
-                        # Verify embeddings are valid
-                        if audio_embeds is None:
-                            raise RuntimeError("Audio encoding returned None")
-                            
-                    except (RuntimeError, torch.cuda.OutOfMemoryError) as encoding_error:
-                        print(f"⚠️ Audio encoding failed: {encoding_error}")
-                        print("🔧 Falling back to dummy embeddings")
-                        
-                        # Clear CUDA cache and create dummy embeddings
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                    if len(audio_chunk.shape) == 1:
+                        audio_chunk = audio_chunk[None, :]
+                    
+                    # 🔧 CRITICAL FIX: Ensure audio chunk is reasonable size for single frame
+                    max_audio_samples = 16000 * 2  # 2 seconds max for single frame
+                    if audio_chunk.shape[-1] > max_audio_samples:
+                        print(f"⚠️ Audio chunk too large: {audio_chunk.shape} samples")
+                        print(f"🔧 Truncating to {max_audio_samples} samples for memory efficiency")
+                        audio_chunk = audio_chunk[:, :max_audio_samples]
+                    
+                    # 🔧 MEMORY SAFETY: Pre-check audio size to prevent OOM in audio encoder
+                    audio_duration = audio_chunk.shape[-1] / 16000  # Duration in seconds
+                    estimated_memory_gb = audio_duration * 2.0  # Rough estimate: 2GB per second of audio
+                    
+                    if estimated_memory_gb > 4.0:  # If estimated > 4GB, use dummy embeddings
+                        print(f"⚠️ Audio too large for encoding (estimated {estimated_memory_gb:.1f}GB)")
+                        print("🔧 Using dummy embeddings to prevent OOM")
                         
                         # Create safe dummy embeddings
                         batch_size = 1
                         seq_len = 77  # Standard sequence length
                         embed_dim = 384  # Whisper Tiny embedding dimension
                         audio_embeds = torch.zeros(batch_size, seq_len, embed_dim, device=target_device)
+                    
+                    else:
+                        # Convert to tensor and get audio features
+                        audio_tensor = torch.from_numpy(audio_chunk).float().to(target_device)
+                        
+                        # 🔧 SAFE AUDIO ENCODING: Try encoding with OOM protection
+                        try:
+                            # Get audio embeddings (matching official whisper processing)
+                            audio_embeds = encode_audio_for_latentsync(audio_tensor)
+                            
+                            # Verify embeddings are valid
+                            if audio_embeds is None:
+                                raise RuntimeError("Audio encoding returned None")
+                                
+                        except (RuntimeError, torch.cuda.OutOfMemoryError) as encoding_error:
+                            print(f"⚠️ Audio encoding failed: {encoding_error}")
+                            print("🔧 Falling back to dummy embeddings")
+                            
+                            # Clear CUDA cache and create dummy embeddings
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            
+                            # Create safe dummy embeddings
+                            batch_size = 1
+                            seq_len = 77  # Standard sequence length
+                            embed_dim = 384  # Whisper Tiny embedding dimension
+                            audio_embeds = torch.zeros(batch_size, seq_len, embed_dim, device=target_device)
                 
                 # 🔧 MEMORY CHECK: Validate audio embeddings size
                 if audio_embeds is not None:
