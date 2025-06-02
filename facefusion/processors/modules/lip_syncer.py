@@ -1000,18 +1000,34 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 	temp_video_fps = restrict_video_fps(state_manager.get_item('target_path'), state_manager.get_item('output_video_fps'))
 	model_name = state_manager.get_item('lip_syncer_model')
 
+	# 🔧 DEBUG: Add debug output to see what's happening
+	print(f"🔍 DEBUG process_frames:")
+	print(f"   - source_paths: {source_paths}")
+	print(f"   - source_audio_path: {source_audio_path}")
+	print(f"   - model_name: {model_name}")
+	print(f"   - total_frames: {len(queue_payloads)}")
+
 	# 🚀 OFFICIAL LATENTSYNC: Use 2-step audio processing
 	audio_chunks = None
 	if model_name == 'latentsync' and source_audio_path:
 		print("🎵 Using OFFICIAL LatentSync 2-step audio processing...")
 		total_frames = len(queue_payloads)
 		
-		# 🔧 OFFICIAL METHOD: Create audio chunks using feature2chunks workflow
-		audio_chunks = create_audio_chunks_official(source_audio_path, temp_video_fps, total_frames)
-		print(f"✅ Official LatentSync audio processing complete!")
-		print(f"   - Pre-computed features once (efficient)")
-		print(f"   - Created {len(audio_chunks)} small audio slices")
-		print(f"   - Memory per slice: ~{audio_chunks[0].numel() * 4 / 1024:.1f} KB (TINY!)")
+		try:
+			# 🔧 OFFICIAL METHOD: Create audio chunks using feature2chunks workflow
+			audio_chunks = create_audio_chunks_official(source_audio_path, temp_video_fps, total_frames)
+			print(f"✅ Official LatentSync audio processing complete!")
+			print(f"   - Pre-computed features once (efficient)")
+			print(f"   - Created {len(audio_chunks)} small audio slices")
+			print(f"   - Memory per slice: ~{audio_chunks[0].numel() * 4 / 1024:.1f} KB (TINY!)")
+		except Exception as e:
+			print(f"❌ Official audio processing failed: {e}")
+			print(f"🔧 Will fall back to old method per frame")
+			audio_chunks = None
+	else:
+		print(f"🔧 Not using official LatentSync audio processing:")
+		print(f"   - model_name == 'latentsync': {model_name == 'latentsync'}")
+		print(f"   - source_audio_path exists: {source_audio_path is not None}")
 
 	for queue_payload in process_manager.manage(queue_payloads):
 		frame_number = queue_payload.get('frame_number')
