@@ -1030,7 +1030,7 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                     ], dim=1)
                     
                     print(f"🔧 Final UNet input shape: {unet_input.shape}")
-                    print(f"🔧 Audio embeddings shape: {audio_embeds_input.shape}")
+                    print(f"🔧 Audio embeddings shape: {audio_embeds.shape}")
                     
                     # 🚀 PERFORMANCE: Final dtype check before UNet forward
                     unet_input = unet_input.to(dtype=target_dtype)
