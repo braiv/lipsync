@@ -1258,8 +1258,14 @@ def encode_audio_for_latentsync(audio_tensor):
                 if not audio_written:
                     try:
                         import scipy.io.wavfile as wavfile
-                        # Convert to int16 for scipy
-                        audio_int16 = (audio_numpy * 32767).astype(numpy.int16)
+                        # 🔧 CRITICAL FIX: Ensure audio is 1D array for proper channel handling
+                        if audio_numpy.ndim > 1:
+                            audio_numpy = audio_numpy.flatten()
+                        
+                        # Convert to int16 for scipy and ensure proper range
+                        audio_numpy_clipped = numpy.clip(audio_numpy, -1.0, 1.0)
+                        audio_int16 = (audio_numpy_clipped * 32767).astype(numpy.int16)
+                        
                         wavfile.write(temp_path, 16000, audio_int16)
                         
                         if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
@@ -1320,16 +1326,37 @@ def encode_audio_for_latentsync(audio_tensor):
                 with torch.no_grad():
                     # 🔧 CORRECTED: Use proper Whisper model methods
                     if hasattr(audio_encoder.model, 'encoder'):
-                        # Get mel spectrogram first
-                        mel = audio_encoder.model.log_mel_spectrogram(audio_tensor_input)
-                        # Then encode
-                        audio_features = audio_encoder.model.encoder(mel)
-                        
-                        print(f"✅ Audio encoded using direct Whisper encoder")
-                        print(f"   - Input shape: {audio_tensor_input.shape}")
-                        print(f"   - Output shape: {audio_features.shape}")
-                        print(f"   - Device: {audio_features.device}")
-                        
+                        # Try different Whisper model interfaces
+                        try:
+                            # Method 1: Standard Whisper interface
+                            if hasattr(audio_encoder.model, 'log_mel_spectrogram'):
+                                mel = audio_encoder.model.log_mel_spectrogram(audio_tensor_input)
+                                audio_features = audio_encoder.model.encoder(mel)
+                            # Method 2: Alternative Whisper interface  
+                            elif hasattr(audio_encoder.model, 'get_audio_features'):
+                                audio_features = audio_encoder.model.get_audio_features(audio_tensor_input)
+                            # Method 3: Direct encoder call with mel computation
+                            else:
+                                # Compute mel spectrogram manually if needed
+                                import whisper
+                                mel = whisper.log_mel_spectrogram(audio_tensor_input.squeeze(0))
+                                mel = mel.unsqueeze(0).to(audio_tensor_input.device)
+                                audio_features = audio_encoder.model.encoder(mel)
+                            
+                            print(f"✅ Audio encoded using direct Whisper encoder")
+                            print(f"   - Input shape: {audio_tensor_input.shape}")
+                            print(f"   - Output shape: {audio_features.shape}")
+                            print(f"   - Device: {audio_features.device}")
+                            
+                            return audio_features
+                            
+                        except Exception as whisper_method_error:
+                            print(f"⚠️ Whisper method failed: {whisper_method_error}")
+                            # Continue to fallback
+                    
+                    # Try alternative model access patterns
+                    elif hasattr(audio_encoder, 'encode_audio'):
+                        audio_features = audio_encoder.encode_audio(audio_tensor_input)
                         return audio_features
                 
             except Exception as direct_error:
