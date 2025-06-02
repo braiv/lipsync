@@ -1373,13 +1373,17 @@ def process_frame_wav2lip(source_face: Face, target_frame: VisionFrame, audio_ch
     print("⚠️ Falling back to original frame (Wav2Lip not implemented)")
     return target_frame
 
-def create_latentsync_mouth_mask(target_frame: VisionFrame, source_face: Face) -> numpy.ndarray:
+def create_latentsync_mouth_mask(target_frame: VisionFrame, target_face: Face) -> numpy.ndarray:
     """Create a mouth region mask for inpainting using FaceFusion's high-quality method"""
     height, width = target_frame.shape[:2]
     
+    # 🔧 CRITICAL FIX: Use the transformed landmarks that match the 512x512 crop
+    # The target_face landmarks are in original image coordinates, but we need crop coordinates
+    # This function should receive the transformed landmarks instead
+    
     # Get face landmarks if available
-    if source_face is not None and hasattr(source_face, 'landmark_set') and source_face.landmark_set is not None:
-        landmarks_68 = source_face.landmark_set.get('68')
+    if target_face is not None and hasattr(target_face, 'landmark_set') and target_face.landmark_set is not None:
+        landmarks_68 = target_face.landmark_set.get('68')
         
         if landmarks_68 is not None and len(landmarks_68) >= 68:
             # 🔧 CRITICAL FIX: Use FaceFusion's high-quality mouth mask method
@@ -1388,17 +1392,13 @@ def create_latentsync_mouth_mask(target_frame: VisionFrame, source_face: Face) -
             # Create convex hull around mouth region (same as FaceFusion)
             convex_hull = cv2.convexHull(landmarks_68[numpy.r_[3:14, 31:36]].astype(numpy.int32))
             
-            # Create mask at 512x512 resolution (FaceFusion standard)
-            mouth_mask = numpy.zeros((512, 512)).astype(numpy.float32)
+            # Create mask at current frame resolution
+            mouth_mask = numpy.zeros((height, width)).astype(numpy.float32)
             mouth_mask = cv2.fillConvexPoly(mouth_mask, convex_hull, 1.0)
             
             # Apply erosion and Gaussian blur (same as FaceFusion)
             mouth_mask = cv2.erode(mouth_mask.clip(0, 1), numpy.ones((21, 3)))
             mouth_mask = cv2.GaussianBlur(mouth_mask, (0, 0), sigmaX=1, sigmaY=15)
-            
-            # Resize to target frame size
-            if (height, width) != (512, 512):
-                mouth_mask = cv2.resize(mouth_mask, (width, height), interpolation=cv2.INTER_LINEAR)
             
             return mouth_mask
     
@@ -1542,27 +1542,64 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
 
     # --- Apply mask and paste lips back ---
     if model_name == 'latentsync':
-        # 🔧 CRITICAL FIX: LatentSync already produces complete face with inpainting
-        # Don't use the normal paste-back operation which is designed for Wav2Lip
-        # Instead, use direct replacement with the mouth mask for blending
+        # 🔧 CRITICAL FIX: LatentSync produces complete 512x512 face with lip sync
+        # Use direct mouth region blending instead of paste_back
         
-        print("🔧 LatentSync: Using direct face replacement with mouth mask blending")
+        print("🔧 LatentSync: Using direct mouth region blending")
         
-        # LatentSync output is already 512x512, just need to transform back to original position
-        crop_vision_frame = close_vision_frame  # No need for warpAffine since it's already 512x512
+        # LatentSync output is already 512x512 - this is the lip-synced face
+        latentsync_face = close_vision_frame  # This contains the lip-synced mouth
         
-        # Create a more precise mouth mask for blending
-        mouth_mask_precise = create_latentsync_mouth_mask(crop_vision_frame, target_face)
+        # Create a precise mouth mask for the transformed face landmarks
+        # 🔧 CRITICAL FIX: Use transformed landmarks that match the 512x512 crop coordinates
+        # Create a temporary face object with transformed landmarks
+        from facefusion.typing import Face
+        temp_face = Face()
+        temp_face.landmark_set = {'68': face_landmark_68}
+        
+        mouth_mask_precise = create_latentsync_mouth_mask(crop_vision_frame, temp_face)
         
         # Apply Gaussian blur to the mask for smoother blending
-        mouth_mask_precise = cv2.GaussianBlur(mouth_mask_precise, (21, 21), 0)
+        mouth_mask_precise = cv2.GaussianBlur(mouth_mask_precise, (15, 15), 0)
         
-        # Ensure mask is in the right format
+        # Ensure mask is in the right format and normalize
         if len(mouth_mask_precise.shape) == 2:
             mouth_mask_precise = numpy.stack([mouth_mask_precise] * 3, axis=2)
         
-        # Use the mouth mask for blending instead of the full crop mask
-        paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, mouth_mask_precise[:,:,0], affine_matrix)
+        # Normalize mask to [0, 1] range
+        mouth_mask_precise = mouth_mask_precise.astype(numpy.float32)
+        if mouth_mask_precise.max() > 1.0:
+            mouth_mask_precise = mouth_mask_precise / 255.0
+        
+        print(f"🔧 Mouth mask shape: {mouth_mask_precise.shape}, range: [{mouth_mask_precise.min():.3f}, {mouth_mask_precise.max():.3f}]")
+        
+        # Check if mask is effective (should have some non-zero values)
+        mask_coverage = numpy.sum(mouth_mask_precise > 0.1) / mouth_mask_precise.size
+        print(f"🔧 Mouth mask coverage: {mask_coverage:.1%} of image")
+        
+        if mask_coverage < 0.01:  # Less than 1% coverage
+            print("⚠️ WARNING: Mouth mask has very low coverage - lip sync may not be visible")
+            print("🔧 This usually means landmark detection failed or coordinates are wrong")
+        
+        # Direct blending: Replace mouth region of original crop with LatentSync output
+        # crop_vision_frame = original face crop (512x512)
+        # latentsync_face = lip-synced face (512x512)
+        # mouth_mask_precise = where to blend (512x512x3)
+        
+        # Blend the mouth region directly
+        blended_crop = crop_vision_frame.astype(numpy.float32) * (1.0 - mouth_mask_precise) + \
+                      latentsync_face.astype(numpy.float32) * mouth_mask_precise
+        
+        # Convert back to uint8
+        crop_vision_frame = blended_crop.astype(numpy.uint8)
+        
+        print(f"🔧 Blended crop shape: {crop_vision_frame.shape}")
+        print(f"🔧 Blending complete - mouth region should now show lip sync")
+        
+        # Now use the standard paste_back with the blended crop
+        # Use the original mouth mask for final paste-back
+        crop_mask = numpy.minimum.reduce(crop_masks)
+        paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
         
     else:
         # Traditional Wav2Lip paste-back operation
