@@ -1374,38 +1374,48 @@ def process_frame_wav2lip(source_face: Face, target_frame: VisionFrame, audio_ch
     return target_frame
 
 def create_latentsync_mouth_mask(target_frame: VisionFrame, source_face: Face) -> numpy.ndarray:
-    """Create a mouth region mask for inpainting"""
+    """Create a mouth region mask for inpainting using FaceFusion's high-quality method"""
     height, width = target_frame.shape[:2]
-    mask = numpy.zeros((height, width), dtype=numpy.float32)
     
     # Get face landmarks if available
     if source_face is not None and hasattr(source_face, 'landmark_set') and source_face.landmark_set is not None:
         landmarks_68 = source_face.landmark_set.get('68')
         
         if landmarks_68 is not None and len(landmarks_68) >= 68:
-            landmarks = landmarks_68.astype(numpy.int32)
+            # 🔧 CRITICAL FIX: Use FaceFusion's high-quality mouth mask method
+            # This matches the create_mouth_mask function from face_masker.py
             
-            # Mouth landmarks (indices 48-67 in 68-point landmarks)
-            mouth_points = landmarks[48:68]
+            # Create convex hull around mouth region (same as FaceFusion)
+            convex_hull = cv2.convexHull(landmarks_68[numpy.r_[3:14, 31:36]].astype(numpy.int32))
             
-            # Create convex hull around mouth
-            hull = cv2.convexHull(mouth_points)
-            cv2.fillPoly(mask, [hull], 1.0)
+            # Create mask at 512x512 resolution (FaceFusion standard)
+            mouth_mask = numpy.zeros((512, 512)).astype(numpy.float32)
+            mouth_mask = cv2.fillConvexPoly(mouth_mask, convex_hull, 1.0)
             
-            # Dilate mask slightly for better coverage
-            kernel = numpy.ones((15, 15), numpy.uint8)
-            mask = cv2.dilate(mask, kernel, iterations=1)
-    else:
-        # Fallback: create a simple rectangular mask in the lower face region
-        center_x, center_y = width // 2, int(height * 0.7)
-        mask_width, mask_height = width // 4, height // 6
-        
-        x1 = max(0, center_x - mask_width // 2)
-        x2 = min(width, center_x + mask_width // 2)
-        y1 = max(0, center_y - mask_height // 2)
-        y2 = min(height, center_y + mask_height // 2)
-        
-        mask[y1:y2, x1:x2] = 1.0
+            # Apply erosion and Gaussian blur (same as FaceFusion)
+            mouth_mask = cv2.erode(mouth_mask.clip(0, 1), numpy.ones((21, 3)))
+            mouth_mask = cv2.GaussianBlur(mouth_mask, (0, 0), sigmaX=1, sigmaY=15)
+            
+            # Resize to target frame size
+            if (height, width) != (512, 512):
+                mouth_mask = cv2.resize(mouth_mask, (width, height), interpolation=cv2.INTER_LINEAR)
+            
+            return mouth_mask
+    
+    # Fallback: create a simple rectangular mask in the lower face region
+    mask = numpy.zeros((height, width), dtype=numpy.float32)
+    center_x, center_y = width // 2, int(height * 0.7)
+    mask_width, mask_height = width // 4, height // 6
+    
+    x1 = max(0, center_x - mask_width // 2)
+    x2 = min(width, center_x + mask_width // 2)
+    y1 = max(0, center_y - mask_height // 2)
+    y2 = min(height, center_y + mask_height // 2)
+    
+    mask[y1:y2, x1:x2] = 1.0
+    
+    # Apply some blur to the fallback mask too
+    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=5, sigmaY=5)
     
     return mask
 
@@ -1531,11 +1541,37 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         return temp_vision_frame
 
     # --- Apply mask and paste lips back ---
-    crop_vision_frame = cv2.warpAffine(close_vision_frame, cv2.invertAffineTransform(close_matrix), (512, 512), borderMode=cv2.BORDER_REPLICATE)
-    crop_mask = numpy.minimum.reduce(crop_masks)
-    print("🔍 crop_mask min/max:", crop_mask.min(), crop_mask.max())
+    if model_name == 'latentsync':
+        # 🔧 CRITICAL FIX: LatentSync already produces complete face with inpainting
+        # Don't use the normal paste-back operation which is designed for Wav2Lip
+        # Instead, use direct replacement with the mouth mask for blending
+        
+        print("🔧 LatentSync: Using direct face replacement with mouth mask blending")
+        
+        # LatentSync output is already 512x512, just need to transform back to original position
+        crop_vision_frame = close_vision_frame  # No need for warpAffine since it's already 512x512
+        
+        # Create a more precise mouth mask for blending
+        mouth_mask_precise = create_latentsync_mouth_mask(crop_vision_frame, target_face)
+        
+        # Apply Gaussian blur to the mask for smoother blending
+        mouth_mask_precise = cv2.GaussianBlur(mouth_mask_precise, (21, 21), 0)
+        
+        # Ensure mask is in the right format
+        if len(mouth_mask_precise.shape) == 2:
+            mouth_mask_precise = numpy.stack([mouth_mask_precise] * 3, axis=2)
+        
+        # Use the mouth mask for blending instead of the full crop mask
+        paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, mouth_mask_precise[:,:,0], affine_matrix)
+        
+    else:
+        # Traditional Wav2Lip paste-back operation
+        crop_vision_frame = cv2.warpAffine(close_vision_frame, cv2.invertAffineTransform(close_matrix), (512, 512), borderMode=cv2.BORDER_REPLICATE)
+        crop_mask = numpy.minimum.reduce(crop_masks)
+        print("🔍 crop_mask min/max:", crop_mask.min(), crop_mask.max())
 
-    paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
+        paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
+    
     return paste_vision_frame
 
 def encode_audio_for_latentsync(audio_input):
