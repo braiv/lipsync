@@ -560,7 +560,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
     
     if model_name == 'latentsync':
         # Use the official LatentSync pipeline we implemented
-        # Convert AudioFrame to raw audio format expected by process_frame
+        # Convert AudioFrame to raw audio format expected by process_frame_latentsync
         if isinstance(temp_audio_frame, numpy.ndarray):
             # temp_audio_frame is already in the right format
             raw_audio = temp_audio_frame
@@ -568,8 +568,8 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
             # Convert from AudioFrame format to raw audio
             raw_audio = temp_audio_frame.flatten() if hasattr(temp_audio_frame, 'flatten') else temp_audio_frame
         
-        # Pass the actual target_face to process_frame for proper mask creation
-        return process_frame(target_face, close_vision_frame, raw_audio)
+        # Pass the actual target_face to process_frame_latentsync for proper mask creation
+        return process_frame_latentsync(target_face, close_vision_frame, raw_audio)
     
     else:
         # For other models (like Wav2Lip), use ONNX inference
@@ -654,7 +654,7 @@ def get_reference_frame(source_face : Face, target_face : Face, temp_vision_fram
 	pass
 
 
-def process_frame(source_face: Face, target_frame: VisionFrame, audio_chunk: numpy.ndarray) -> VisionFrame:
+def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio_chunk: numpy.ndarray) -> VisionFrame:
     """
     Process a single frame using the official LatentSync pipeline
     """
@@ -851,7 +851,7 @@ def process_frame(source_face: Face, target_frame: VisionFrame, audio_chunk: num
             return process_frame_wav2lip(source_face, target_frame, audio_chunk)
             
     except Exception as error:
-        print(f"❌ Error in process_frame: {error}")
+        print(f"❌ Error in process_frame_latentsync: {error}")
         import traceback
         traceback.print_exc()
         
@@ -861,6 +861,19 @@ def process_frame(source_face: Face, target_frame: VisionFrame, audio_chunk: num
         
         # Return original frame on error
         return target_frame
+
+
+def process_frame(inputs : LipSyncerInputs) -> VisionFrame:
+    """
+    Standard FaceFusion interface for process_frame - takes dictionary input
+    """
+    # Extract inputs from dictionary
+    reference_faces = inputs.get('reference_faces')
+    source_audio_frame = inputs.get('source_audio_frame')
+    target_vision_frame = inputs.get('target_vision_frame')
+    
+    # Call the original process_frame_original function
+    return process_frame_original(inputs)
 
 
 def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload], update_progress : UpdateProgress) -> None:
