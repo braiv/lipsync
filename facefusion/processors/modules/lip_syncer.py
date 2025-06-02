@@ -403,7 +403,18 @@ def get_vae():
             print(f"⚠️ Using CPU for VAE (CUDA not available)")
             
         # 🔧 CRITICAL FIX: Use correct VAE model and configuration (matching official LatentSync)
-        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(vae_device).float().eval()
+        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(vae_device)
+        
+        # 🔧 CRITICAL FIX: Set VAE to FP16 for consistency with performance mode
+        perf_config = get_performance_config()
+        if perf_config["use_fp16"] and torch.cuda.is_available():
+            vae = vae.half()  # Convert VAE to FP16
+            print(f"🚀 VAE converted to FP16 for performance consistency")
+        else:
+            vae = vae.float()  # Keep as FP32
+            print(f"🔧 VAE kept in FP32 precision")
+        
+        vae = vae.eval()
         
         # 🔧 CRITICAL: Set official LatentSync VAE configuration
         vae.config.scaling_factor = 0.18215  # Official LatentSync scaling factor
@@ -414,15 +425,19 @@ def get_vae():
         print(f"   - Scaling factor: {vae.config.scaling_factor}")
         print(f"   - Shift factor: {vae.config.shift_factor}")
         print(f"   - Device: {vae_device}")
-        print(f"   - Precision: float32")
+        print(f"   - Precision: {'FP16' if vae.dtype == torch.float16 else 'FP32'}")
     else:
-        # 🔧 CRITICAL: Ensure VAE stays on GPU if available (consistent with audio encoder)
-        if torch.cuda.is_available() and vae.device.type != 'cuda':
-            try:
-                vae = vae.float().cuda()
-                print("🔄 Moved VAE to GPU with float32 precision for consistency")
-            except Exception as move_error:
-                print(f"⚠️ VAE GPU move failed: {move_error}")
+        # 🔧 CRITICAL: Ensure VAE precision matches performance mode
+        perf_config = get_performance_config()
+        target_dtype = torch.float16 if perf_config["use_fp16"] and torch.cuda.is_available() else torch.float32
+        
+        if vae.dtype != target_dtype:
+            print(f"🔧 Converting VAE from {vae.dtype} to {target_dtype} for consistency")
+            if target_dtype == torch.float16:
+                vae = vae.half()
+            else:
+                vae = vae.float()
+    
     return vae
 
 def verify_device_consistency():
@@ -1250,18 +1265,37 @@ def get_unet_model():
             state_dict = checkpoint.get("state_dict", checkpoint)
             state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
             unet_model.load_state_dict(state_dict)
-            unet_model.eval().to(target_device).float()
+            
+            # 🔧 CRITICAL FIX: Set UNet precision based on performance mode
+            perf_config = get_performance_config()
+            if perf_config["use_fp16"] and torch.cuda.is_available():
+                unet_model = unet_model.half().to(target_device).eval()
+                print(f"🚀 UNet converted to FP16 for performance consistency")
+            else:
+                unet_model = unet_model.float().to(target_device).eval()
+                print(f"🔧 UNet kept in FP32 precision")
             
             # Clean up checkpoint from memory
             del checkpoint, state_dict
             torch.cuda.empty_cache()
             
-            print(f"✅ PyTorch UNet loaded on {target_device}")
+            print(f"✅ PyTorch UNet loaded on {target_device} with {'FP16' if unet_model.dtype == torch.float16 else 'FP32'} precision")
             
         except Exception as load_error:
             print(f"❌ Failed to load PyTorch UNet: {load_error}")
             unet_model = None
             raise RuntimeError(f"Could not initialize PyTorch UNet: {load_error}")
+    else:
+        # 🔧 CRITICAL: Ensure UNet precision matches performance mode
+        perf_config = get_performance_config()
+        target_dtype = torch.float16 if perf_config["use_fp16"] and torch.cuda.is_available() else torch.float32
+        
+        if unet_model.dtype != target_dtype:
+            print(f"🔧 Converting UNet from {unet_model.dtype} to {target_dtype} for consistency")
+            if target_dtype == torch.float16:
+                unet_model = unet_model.half()
+            else:
+                unet_model = unet_model.float()
     
     return unet_model
 
