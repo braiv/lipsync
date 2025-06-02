@@ -678,6 +678,10 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
             unet_model = get_unet_model()
             scheduler = get_scheduler()
             
+            # 🔧 CRITICAL FIX: Determine target dtype from UNet model
+            unet_dtype = next(unet_model.parameters()).dtype
+            print(f"🔧 UNet model dtype: {unet_dtype}")
+            
             # 2. Pipeline parameters (matching official)
             num_inference_steps = 20  # Official uses 20 steps
             guidance_scale = 3.5      # Official CFG scale
@@ -702,6 +706,10 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 if audio_embeds.dim() == 2:
                     audio_embeds = audio_embeds.unsqueeze(0)  # Add batch dim
                 
+                # 🔧 CRITICAL FIX: Convert audio embeddings to UNet dtype
+                audio_embeds = audio_embeds.to(dtype=unet_dtype)
+                print(f"🔧 Audio embeddings dtype: {audio_embeds.dtype}")
+                
                 # Duplicate for CFG if needed
                 if do_classifier_free_guidance:
                     # Create unconditional (empty) audio embedding
@@ -723,11 +731,17 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 target_tensor = target_tensor.permute(2, 0, 1).unsqueeze(0).to(target_device)
                 target_tensor = (target_tensor - 0.5) / 0.5  # Normalize to [-1, 1]
                 
+                # 🔧 CRITICAL FIX: Convert target tensor to UNet dtype
+                target_tensor = target_tensor.to(dtype=unet_dtype)
+                
                 # 6. Encode image to latents
                 print("🔄 Encoding image to latents...")
                 image_latents = vae.encode(target_tensor).latent_dist.sample()
                 # 🔧 CRITICAL FIX: Use official LatentSync VAE scaling (with shift factor)
                 image_latents = (image_latents - vae.config.shift_factor) * vae.config.scaling_factor
+                
+                # 🔧 CRITICAL FIX: Ensure latents are in UNet dtype
+                image_latents = image_latents.to(dtype=unet_dtype)
                 
                 # 7. Create mask (mouth region)
                 print("🎭 Creating mouth mask...")
@@ -735,6 +749,9 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 mask_pil = Image.fromarray((mask * 255).astype(numpy.uint8)).resize((512, 512), Image.LANCZOS)
                 mask_tensor = torch.from_numpy(numpy.array(mask_pil)).float() / 255.0
                 mask_tensor = mask_tensor.unsqueeze(0).unsqueeze(0).to(target_device)  # [1, 1, 512, 512]
+                
+                # 🔧 CRITICAL FIX: Convert mask to UNet dtype
+                mask_tensor = mask_tensor.to(dtype=unet_dtype)
                 
                 # Encode mask to latent space
                 mask_latents = F.interpolate(mask_tensor, size=(64, 64), mode='nearest')
@@ -748,6 +765,9 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 masked_image_latents = (masked_image_latents - vae.config.shift_factor) * vae.config.scaling_factor
                 masked_image_latents = masked_image_latents.unsqueeze(2)  # Add frame dimension
                 
+                # 🔧 CRITICAL FIX: Ensure masked image latents are in UNet dtype
+                masked_image_latents = masked_image_latents.to(dtype=unet_dtype)
+                
                 # 9. Prepare reference latents (same as image latents for single frame)
                 ref_latents = image_latents.unsqueeze(2)  # Add frame dimension
                 
@@ -760,7 +780,7 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 
                 latents = prepare_latents(
                     batch_size, num_frames, num_channels_latents, height, width,
-                    dtype=target_tensor.dtype, device=target_device
+                    dtype=unet_dtype, device=target_device  # 🔧 Use UNet dtype
                 )
                 
                 log_memory_usage("🔄 Latents prepared")
@@ -777,6 +797,9 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                     # Scale model input (official scheduler scaling)
                     latent_model_input = scheduler.scale_model_input(latent_model_input, t)
                     
+                    # 🔧 CRITICAL FIX: Ensure latent input is in UNet dtype
+                    latent_model_input = latent_model_input.to(dtype=unet_dtype)
+                    
                     # Prepare conditioning inputs
                     if do_classifier_free_guidance:
                         # Duplicate conditioning for CFG
@@ -788,6 +811,11 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                         masked_img_input = masked_image_latents
                         ref_input = ref_latents
                     
+                    # 🔧 CRITICAL FIX: Ensure all conditioning inputs are in UNet dtype
+                    mask_input = mask_input.to(dtype=unet_dtype)
+                    masked_img_input = masked_img_input.to(dtype=unet_dtype)
+                    ref_input = ref_input.to(dtype=unet_dtype)
+                    
                     # Concatenate all inputs (official order)
                     unet_input = torch.cat([
                         latent_model_input,
@@ -796,11 +824,15 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                         ref_input
                     ], dim=1)
                     
+                    # 🔧 CRITICAL FIX: Final dtype check before UNet forward
+                    unet_input = unet_input.to(dtype=unet_dtype)
+                    audio_embeds_input = audio_embeds.to(dtype=unet_dtype)
+                    
                     # UNet forward pass
                     noise_pred = unet_model(
                         sample=unet_input,
                         timestep=t,
-                        encoder_hidden_states=audio_embeds
+                        encoder_hidden_states=audio_embeds_input
                     ).sample
                     
                     # Apply classifier-free guidance
@@ -810,6 +842,9 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                     
                     # Scheduler step (official denoising)
                     latents = scheduler.step(noise_pred, t, latents).prev_sample
+                    
+                    # 🔧 CRITICAL FIX: Ensure latents maintain UNet dtype
+                    latents = latents.to(dtype=unet_dtype)
                     
                     # 🧹 MINIMAL CLEANUP: Only every 5 steps and only cache
                     if i % 5 == 0 and torch.cuda.is_available():
@@ -1020,7 +1055,7 @@ def prepare_latents(batch_size, num_frames, num_channels_latents, height, width,
     """Prepare initial latents for denoising (matching official LatentSync)"""
     shape = (batch_size, num_channels_latents, num_frames, height, width)
     
-    # Initialize with random noise
+    # Initialize with random noise in the correct dtype
     latents = torch.randn(shape, generator=generator, device=device, dtype=dtype)
     
     # Scale by scheduler's init noise sigma
@@ -1139,7 +1174,7 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
     # LatentSync: create mouth mask only for final paste-back (not used during diffusion)
     mouth_mask = create_mouth_mask(face_landmark_68)
     crop_masks = [mouth_mask]
-    
+
     box_mask = create_static_box_mask(crop_vision_frame.shape[:2][::-1], state_manager.get_item('face_mask_blur'), state_manager.get_item('face_mask_padding'))
     crop_masks.append(box_mask)
 
