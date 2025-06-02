@@ -75,6 +75,32 @@ def create_empty_audio_frame() -> AudioFrame:
 	return audio_frame
 
 
+def get_raw_audio_frame(audio_path : str, fps : Fps, frame_number : int) -> Optional[numpy.ndarray]:
+	"""Get raw audio frame for LatentSync (FP32 format)"""
+	if is_audio(audio_path):
+		# LatentSync uses 16kHz for Whisper
+		sample_rate = 16000
+		channel_total = 2
+		
+		audio_buffer = read_audio_buffer(audio_path, sample_rate, channel_total)
+		audio = numpy.frombuffer(audio_buffer, dtype = numpy.int16).reshape(-1, 2)
+		audio = prepare_audio(audio)  # Convert to mono and normalize
+		
+		# Calculate frame duration in samples
+		frame_duration_samples = int(sample_rate / fps)
+		start_sample = frame_number * frame_duration_samples
+		end_sample = start_sample + frame_duration_samples
+		
+		# Extract the audio segment for this frame
+		if start_sample < len(audio):
+			audio_frame = audio[start_sample:end_sample]
+			# Pad with zeros if needed
+			if len(audio_frame) < frame_duration_samples:
+				audio_frame = numpy.pad(audio_frame, (0, frame_duration_samples - len(audio_frame)), mode='constant')
+			return audio_frame.astype(numpy.float32)  # Ensure FP32 output
+	return None
+
+
 def create_empty_raw_audio_frame(fps: Fps, sample_rate: int = 16000) -> numpy.ndarray:
 	"""Create empty raw audio frame for LatentSync (FP32 format)"""
 	frame_duration_samples = int(sample_rate / fps)
@@ -145,10 +171,16 @@ def extract_audio_frames(spectrogram : Spectrogram, fps : Fps) -> List[AudioFram
 	return audio_frames
 
 
-def get_raw_audio_frame(audio_path : str, fps : Fps, frame_number : int = 0) -> Optional[numpy.ndarray]:
-	"""Get raw audio waveform frame for a specific frame number"""
+@lru_cache(maxsize = 128)
+def read_static_raw_audio_for_latentsync(audio_path: str, fps: Fps) -> Optional[numpy.ndarray]:
+	"""Read entire raw audio file for LatentSync batch processing (cached)"""
+	return read_raw_audio_for_latentsync(audio_path, fps)
+
+
+def read_raw_audio_for_latentsync(audio_path: str, fps: Fps) -> Optional[numpy.ndarray]:
+	"""Read entire raw audio file for LatentSync batch processing"""
 	if is_audio(audio_path):
-		# LatentSync uses 16kHz for Whisper, not 48kHz
+		# LatentSync uses 16kHz for Whisper
 		sample_rate = 16000
 		channel_total = 2
 		
@@ -159,16 +191,48 @@ def get_raw_audio_frame(audio_path : str, fps : Fps, frame_number : int = 0) -> 
 		# Ensure FP32 consistency for LatentSync
 		audio = audio.astype(numpy.float32)
 		
-		# Calculate frame duration in samples
-		frame_duration_samples = int(sample_rate / fps)
-		start_sample = frame_number * frame_duration_samples
-		end_sample = start_sample + frame_duration_samples
+		return audio
+	return None
+
+
+def get_audio_chunks_for_latentsync(audio_path: str, fps: Fps, total_frames: int) -> List[numpy.ndarray]:
+	"""
+	Get audio chunks for LatentSync batch processing (official approach)
+	This mimics the official audio2feat + feature2chunks workflow
+	"""
+	if is_audio(audio_path):
+		# Read the entire audio file once (like official audio2feat)
+		full_audio = read_static_raw_audio_for_latentsync(audio_path, fps)
+		if full_audio is None:
+			return []
 		
-		# Extract the audio segment for this frame
-		if start_sample < len(audio):
-			audio_frame = audio[start_sample:end_sample]
-			# Pad with zeros if needed
-			if len(audio_frame) < frame_duration_samples:
-				audio_frame = numpy.pad(audio_frame, (0, frame_duration_samples - len(audio_frame)), mode='constant')
-			return audio_frame.astype(numpy.float32)  # Ensure FP32 output
+		# Calculate frame duration in samples
+		sample_rate = 16000  # LatentSync uses 16kHz
+		frame_duration_samples = int(sample_rate / fps)
+		
+		# Create chunks for each frame (like official feature2chunks)
+		audio_chunks = []
+		for frame_idx in range(total_frames):
+			start_sample = frame_idx * frame_duration_samples
+			end_sample = start_sample + frame_duration_samples
+			
+			# Extract the audio segment for this frame
+			if start_sample < len(full_audio):
+				audio_chunk = full_audio[start_sample:end_sample]
+				# Pad with zeros if needed
+				if len(audio_chunk) < frame_duration_samples:
+					audio_chunk = numpy.pad(audio_chunk, (0, frame_duration_samples - len(audio_chunk)), mode='constant')
+				audio_chunks.append(audio_chunk.astype(numpy.float32))
+			else:
+				# Create empty chunk if beyond audio length
+				audio_chunks.append(create_empty_raw_audio_frame(fps, sample_rate))
+		
+		return audio_chunks
+	return []
+
+
+def get_audio_chunk_from_batch(audio_chunks: List[numpy.ndarray], frame_number: int) -> Optional[numpy.ndarray]:
+	"""Get a specific audio chunk from pre-computed batch"""
+	if frame_number < len(audio_chunks):
+		return audio_chunks[frame_number]
 	return None
