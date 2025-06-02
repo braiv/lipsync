@@ -876,6 +876,16 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                     audio_memory_gb = audio_embeds.numel() * audio_embeds.element_size() / (1024**3)
                     print(f"🔧 Audio embeddings memory: {audio_memory_gb:.2f} GB")
                     
+                    # 🔧 CRITICAL FIX: Reshape audio embeddings for UNet compatibility
+                    # The UNet expects [batch, seq_len, embed_dim] format
+                    if audio_embeds.dim() == 3 and audio_embeds.shape[0] > 1:
+                        # If we have [seq_len, frames, embed_dim], reshape to [batch, seq_len*frames, embed_dim]
+                        batch_size = 1
+                        seq_len = audio_embeds.shape[0] * audio_embeds.shape[1]  # 50 * 5 = 250
+                        embed_dim = audio_embeds.shape[2]  # 384
+                        audio_embeds = audio_embeds.reshape(batch_size, seq_len, embed_dim)
+                        print(f"🔧 Reshaped audio embeddings from [50, 5, 384] to {audio_embeds.shape}")
+                    
                     # If embeddings are too large, truncate them
                     if audio_memory_gb > 2.0:  # More than 2GB is too much for single frame
                         print(f"⚠️ Audio embeddings too large ({audio_memory_gb:.2f} GB), truncating...")
@@ -1006,12 +1016,21 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                     ref_input = ref_input.to(dtype=target_dtype)
                     
                     # Concatenate all inputs (official order)
+                    print(f"🔧 UNet input shapes before concatenation:")
+                    print(f"   - latent_model_input: {latent_model_input.shape}")
+                    print(f"   - mask_input: {mask_input.shape}")
+                    print(f"   - masked_img_input: {masked_img_input.shape}")
+                    print(f"   - ref_input: {ref_input.shape}")
+                    
                     unet_input = torch.cat([
                         latent_model_input,
                         mask_input,
                         masked_img_input,
                         ref_input
                     ], dim=1)
+                    
+                    print(f"🔧 Final UNet input shape: {unet_input.shape}")
+                    print(f"🔧 Audio embeddings shape: {audio_embeds_input.shape}")
                     
                     # 🚀 PERFORMANCE: Final dtype check before UNet forward
                     unet_input = unet_input.to(dtype=target_dtype)
@@ -1624,7 +1643,14 @@ def encode_audio_for_latentsync(audio_input):
             
             audio_features = audio_features.to(target_device).float()
             
-            if audio_features.dim() == 2:
+            # 🔧 CRITICAL FIX: Handle Whisper's output shape properly
+            # Whisper returns [seq_len, frames, embed_dim] but UNet expects [batch, seq_len, embed_dim]
+            if audio_features.dim() == 3:
+                # Reshape from [seq_len, frames, embed_dim] to [batch, seq_len*frames, embed_dim]
+                seq_len, frames, embed_dim = audio_features.shape
+                audio_features = audio_features.reshape(1, seq_len * frames, embed_dim)
+                print(f"🔧 Reshaped Whisper output from [{seq_len}, {frames}, {embed_dim}] to {audio_features.shape}")
+            elif audio_features.dim() == 2:
                 audio_features = audio_features.unsqueeze(0)
             
             print(f"✅ Audio encoding successful: {audio_features.shape}")
@@ -1669,7 +1695,14 @@ def encode_audio_for_latentsync(audio_input):
                     
                     audio_features = audio_features.to(target_device).float()
                     
-                    if audio_features.dim() == 2:
+                    # 🔧 CRITICAL FIX: Handle Whisper's output shape properly
+                    # Whisper returns [seq_len, frames, embed_dim] but UNet expects [batch, seq_len, embed_dim]
+                    if audio_features.dim() == 3:
+                        # Reshape from [seq_len, frames, embed_dim] to [batch, seq_len*frames, embed_dim]
+                        seq_len, frames, embed_dim = audio_features.shape
+                        audio_features = audio_features.reshape(1, seq_len * frames, embed_dim)
+                        print(f"🔧 Reshaped Whisper output from [{seq_len}, {frames}, {embed_dim}] to {audio_features.shape}")
+                    elif audio_features.dim() == 2:
                         audio_features = audio_features.unsqueeze(0)
                     
                     print(f"✅ Extended audio encoding successful: {audio_features.shape}")
