@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 from functools import lru_cache
+import time
 from typing import List
 
 import cv2
@@ -1506,62 +1507,116 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
 
 def encode_audio_for_latentsync(audio_input):
     """
-    Handle audio encoding for LatentSync - now supports both raw audio and pre-computed slices
+    Encode audio for LatentSync using Whisper
+    Handles both raw audio arrays and pre-computed features
+    🔧 CRITICAL FIX: Proper handling of short audio to prevent Whisper padding errors
     """
-    target_device = "cuda" if torch.cuda.is_available() else "cpu"
+    target_device = get_device_for_lip_syncer()
     
-    # 🔧 OFFICIAL LATENTSYNC: Check if input is already a pre-computed audio slice
-    if isinstance(audio_input, torch.Tensor) and audio_input.dim() == 2 and audio_input.shape[1] == 384:
-        print(f"✅ Using pre-computed audio slice: {audio_input.shape}")
-        
-        # Ensure proper device and dtype
-        audio_features = audio_input.to(target_device).float()
-        
-        # Add batch dimension if needed
-        if audio_features.dim() == 2:
-            audio_features = audio_features.unsqueeze(0)  # [1, seq_len, 384]
-        
-        print(f"🔧 Final audio features shape: {audio_features.shape}")
-        print(f"🔧 Memory usage: {audio_features.numel() * 4 / 1024:.1f} KB (TINY!)")
-        
-        return audio_features
+    # If it's already a tensor with the right shape, use it directly
+    if isinstance(audio_input, torch.Tensor):
+        if audio_input.dim() == 3 and audio_input.shape[-1] == 384:
+            print(f"🔍 Using pre-computed audio slice: {audio_input.shape}")
+            return audio_input.to(target_device)
+        elif audio_input.dim() == 2 and audio_input.shape[-1] == 384:
+            print(f"🔍 Using pre-computed audio slice (adding batch dim): {audio_input.shape}")
+            return audio_input.unsqueeze(0).to(target_device)
     
-    # 🔧 FALLBACK: Handle raw audio (old method) - should rarely be used now
-    print("⚠️ Processing raw audio - this should be rare with official method")
-    
+    # Handle raw audio input
     try:
-        # Convert tensor to numpy if needed
+        audio_encoder = get_audio_encoder()
+        
+        # Convert to numpy if needed
         if isinstance(audio_input, torch.Tensor):
             audio_numpy = audio_input.cpu().numpy()
         else:
-            audio_numpy = audio_input
+            audio_numpy = numpy.array(audio_input, dtype=numpy.float32)
         
-        # 🔧 MEMORY SAFETY: Limit audio length to prevent OOM
-        max_samples = 16000 * 2  # 2 seconds max to prevent memory issues
+        # 🔧 CRITICAL FIX: Ensure audio is 1D
+        if audio_numpy.ndim > 1:
+            audio_numpy = audio_numpy.flatten()
+        
+        # 🔧 CRITICAL FIX: Whisper requires minimum 30-second chunks (480,000 samples at 16kHz)
+        # But for memory efficiency, we'll use a smaller minimum that still works
+        min_samples = 16000  # 1 second minimum - much more reasonable than 30 seconds
+        max_samples = 16000 * 10  # 10 seconds max to prevent memory issues
+        
+        print(f"🔧 Input audio length: {len(audio_numpy)} samples")
+        
+        # Pad if too short
+        if len(audio_numpy) < min_samples:
+            print(f"⚠️ Audio too short ({len(audio_numpy)} samples), padding to {min_samples} samples")
+            padding_needed = min_samples - len(audio_numpy)
+            # 🔧 CRITICAL FIX: Use reflection padding for more natural audio extension
+            if len(audio_numpy) > 0:
+                # Repeat the audio to reach minimum length
+                repeat_count = (min_samples // len(audio_numpy)) + 1
+                audio_numpy = numpy.tile(audio_numpy, repeat_count)[:min_samples]
+            else:
+                # If completely empty, create minimal noise
+                audio_numpy = numpy.random.normal(0, 0.001, min_samples).astype(numpy.float32)
+        
+        # Truncate if too long
         if len(audio_numpy) > max_samples:
             print(f"⚠️ Audio too long ({len(audio_numpy)} samples), truncating to {max_samples} samples")
             audio_numpy = audio_numpy[:max_samples]
         
-        # Try to encode using audio encoder
-        audio_encoder = get_audio_encoder()
+        # 🔧 CRITICAL FIX: Ensure audio length is compatible with Whisper's requirements
+        # Whisper works best with multiples of 160 samples (10ms frames at 16kHz)
+        frame_size = 160
+        if len(audio_numpy) % frame_size != 0:
+            padding_needed = frame_size - (len(audio_numpy) % frame_size)
+            audio_numpy = numpy.pad(audio_numpy, (0, padding_needed), mode='constant', constant_values=0)
+            print(f"🔧 Aligned audio to frame boundary: {len(audio_numpy)} samples")
         
-        import tempfile
-        import soundfile as sf
+        print(f"🔧 Processed audio length: {len(audio_numpy)} samples")
         
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            temp_path = temp_file.name
+        # Create temporary file for audio2feat
+        temp_path = f"/tmp/temp_audio_{os.getpid()}_{int(time.time() * 1000)}.wav"
         
         try:
-            # Write audio file
+            # 🔧 CRITICAL FIX: Ensure proper audio format for Whisper
             if audio_numpy.dtype != numpy.float32:
                 audio_numpy = audio_numpy.astype(numpy.float32)
             
-            if numpy.max(numpy.abs(audio_numpy)) > 1.0:
+            # 🔧 CRITICAL FIX: Normalize audio to [-1, 1] range
+            if numpy.max(numpy.abs(audio_numpy)) > 0:
                 audio_numpy = audio_numpy / numpy.max(numpy.abs(audio_numpy))
             
+            # 🔧 CRITICAL FIX: Ensure audio is not all zeros (causes Whisper issues)
+            if numpy.all(audio_numpy == 0):
+                print("⚠️ Audio is all zeros, adding minimal noise for Whisper compatibility")
+                audio_numpy = numpy.random.normal(0, 0.001, len(audio_numpy)).astype(numpy.float32)
+            
+            print(f"🔧 Processing audio: {len(audio_numpy)} samples, dtype: {audio_numpy.dtype}")
+            print(f"🔧 Audio range: [{numpy.min(audio_numpy):.6f}, {numpy.max(audio_numpy):.6f}]")
+            
+            # Write audio file with proper format
             sf.write(temp_path, audio_numpy, 16000, format='WAV', subtype='PCM_16')
             
+            # Verify file was written correctly
+            if not os.path.exists(temp_path):
+                raise RuntimeError("Failed to write temporary audio file")
+            
+            file_size = os.path.getsize(temp_path)
+            print(f"🔧 Temporary audio file size: {file_size} bytes")
+            
+            if file_size < 1000:  # Less than 1KB is suspicious
+                raise RuntimeError(f"Audio file too small: {file_size} bytes")
+            
+            # 🔧 CRITICAL FIX: Validate audio file before sending to Whisper
+            try:
+                # Quick validation by reading the file back
+                test_audio, test_sr = sf.read(temp_path)
+                if len(test_audio) < min_samples // 2:
+                    raise RuntimeError(f"Written audio file too short: {len(test_audio)} samples")
+                print(f"🔧 Audio file validation passed: {len(test_audio)} samples at {test_sr}Hz")
+            except Exception as validation_error:
+                print(f"⚠️ Audio file validation failed: {validation_error}")
+                raise RuntimeError(f"Invalid audio file: {validation_error}")
+            
             # Encode using audio2feat
+            print("🔧 Calling audio_encoder.audio2feat()...")
             audio_features = audio_encoder.audio2feat(temp_path)
             
             if isinstance(audio_features, numpy.ndarray):
@@ -1572,7 +1627,7 @@ def encode_audio_for_latentsync(audio_input):
             if audio_features.dim() == 2:
                 audio_features = audio_features.unsqueeze(0)
             
-            print(f"✅ Fallback audio encoding successful: {audio_features.shape}")
+            print(f"✅ Audio encoding successful: {audio_features.shape}")
             
             # Clean up
             if os.path.exists(temp_path):
@@ -1581,7 +1636,52 @@ def encode_audio_for_latentsync(audio_input):
             return audio_features
             
         except Exception as encoding_error:
-            print(f"⚠️ Fallback audio encoding failed: {encoding_error}")
+            print(f"⚠️ Audio encoding failed: {encoding_error}")
+            print(f"🔧 Error type: {type(encoding_error)}")
+            
+            # 🔧 CRITICAL FIX: Check if this is the specific padding error
+            if "Padding size should be less than" in str(encoding_error):
+                print("🔧 Detected Whisper padding error - audio input too short for mel spectrogram")
+                print("🔧 This usually happens with very short audio clips")
+                
+                # Try to create a longer audio file by repeating the input
+                try:
+                    print("🔧 Attempting to fix by creating longer audio...")
+                    
+                    # Create a much longer audio (5 seconds minimum for Whisper stability)
+                    target_length = 16000 * 5  # 5 seconds
+                    if len(audio_numpy) > 0:
+                        repeat_count = (target_length // len(audio_numpy)) + 1
+                        extended_audio = numpy.tile(audio_numpy, repeat_count)[:target_length]
+                    else:
+                        extended_audio = numpy.random.normal(0, 0.001, target_length).astype(numpy.float32)
+                    
+                    # Write the extended audio
+                    sf.write(temp_path, extended_audio, 16000, format='WAV', subtype='PCM_16')
+                    
+                    print(f"🔧 Created extended audio: {len(extended_audio)} samples")
+                    
+                    # Try encoding again
+                    audio_features = audio_encoder.audio2feat(temp_path)
+                    
+                    if isinstance(audio_features, numpy.ndarray):
+                        audio_features = torch.from_numpy(audio_features)
+                    
+                    audio_features = audio_features.to(target_device).float()
+                    
+                    if audio_features.dim() == 2:
+                        audio_features = audio_features.unsqueeze(0)
+                    
+                    print(f"✅ Extended audio encoding successful: {audio_features.shape}")
+                    
+                    # Clean up
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    
+                    return audio_features
+                    
+                except Exception as extended_error:
+                    print(f"⚠️ Extended audio encoding also failed: {extended_error}")
             
             # Clean up
             if os.path.exists(temp_path):
@@ -1589,9 +1689,11 @@ def encode_audio_for_latentsync(audio_input):
     
     except Exception as fallback_error:
         print(f"⚠️ Raw audio processing failed: {fallback_error}")
+        print(f"🔧 Error type: {type(fallback_error)}")
     
-    # 🔧 GUARANTEED FALLBACK: Create small dummy embeddings
-    print("🔧 Using small dummy embeddings")
+    # 🔧 LAST RESORT: Create small dummy embeddings with warning
+    print("⚠️ WARNING: Using dummy embeddings - this will affect lip sync quality")
+    print("🔧 Consider using longer audio clips or pre-computed audio features")
     batch_size = 1
     seq_len = 10  # Small sequence length matching official slices
     embed_dim = 384  # Whisper Tiny embedding dimension

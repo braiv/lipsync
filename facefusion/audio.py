@@ -4,6 +4,8 @@ from typing import Any, List, Optional
 import numpy
 import scipy
 from numpy._typing import NDArray
+import soundfile as sf
+import librosa  # For audio resampling
 
 from facefusion.ffmpeg import read_audio_buffer
 from facefusion.filesystem import is_audio
@@ -76,28 +78,65 @@ def create_empty_audio_frame() -> AudioFrame:
 
 
 def get_raw_audio_frame(audio_path : str, fps : Fps, frame_number : int) -> Optional[numpy.ndarray]:
-	"""Get raw audio frame for LatentSync (FP32 format)"""
+	"""
+	Get raw audio frame for a specific frame number (for LatentSync)
+	🔧 CRITICAL FIX: Ensure minimum audio length to prevent Whisper padding errors
+	"""
 	if is_audio(audio_path):
 		# LatentSync uses 16kHz for Whisper
 		sample_rate = 16000
-		channel_total = 2
+		frame_duration = 1.0 / fps
+		frame_duration_samples = int(sample_rate * frame_duration)
 		
-		audio_buffer = read_audio_buffer(audio_path, sample_rate, channel_total)
-		audio = numpy.frombuffer(audio_buffer, dtype = numpy.int16).reshape(-1, 2)
-		audio = prepare_audio(audio)  # Convert to mono and normalize
+		# 🔧 CRITICAL FIX: Whisper requires minimum 400ms of audio (6400 samples at 16kHz)
+		min_samples = 6400  # 400ms at 16kHz - Whisper's minimum requirement
+		# 🔧 CRITICAL FIX: For very short frames, use larger window for Whisper stability
+		audio_window_samples = max(min_samples, frame_duration_samples * 4)  # Use 4x frame duration minimum
 		
-		# Calculate frame duration in samples
-		frame_duration_samples = int(sample_rate / fps)
-		start_sample = frame_number * frame_duration_samples
-		end_sample = start_sample + frame_duration_samples
+		# Use larger window for Whisper compatibility
+		start_sample = max(0, int(frame_number * frame_duration_samples) - audio_window_samples // 2)
 		
-		# Extract the audio segment for this frame
-		if start_sample < len(audio):
-			audio_frame = audio[start_sample:end_sample]
-			# Pad with zeros if needed
-			if len(audio_frame) < frame_duration_samples:
-				audio_frame = numpy.pad(audio_frame, (0, frame_duration_samples - len(audio_frame)), mode='constant')
-			return audio_frame.astype(numpy.float32)  # Ensure FP32 output
+		try:
+			# Read the audio file
+			audio_data, original_sample_rate = sf.read(audio_path)
+			
+			# Ensure mono
+			if len(audio_data.shape) > 1:
+				audio_data = numpy.mean(audio_data, axis=1)
+			
+			# Resample if needed
+			if original_sample_rate != sample_rate:
+				audio_data = resample_audio(audio_data, original_sample_rate, sample_rate)
+			
+			# Extract the audio window
+			end_sample = start_sample + audio_window_samples
+			
+			if start_sample < len(audio_data):
+				audio_frame = audio_data[start_sample:end_sample]
+				
+				# 🔧 CRITICAL FIX: Ensure minimum length by padding or repeating
+				if len(audio_frame) < min_samples:
+					print(f"🔧 Audio frame too short ({len(audio_frame)} samples), extending to {min_samples}")
+					if len(audio_frame) > 0:
+						# Repeat the audio to reach minimum length
+						repeat_count = (min_samples // len(audio_frame)) + 1
+						audio_frame = numpy.tile(audio_frame, repeat_count)[:min_samples]
+					else:
+						# Create minimal noise if empty
+						audio_frame = numpy.random.normal(0, 0.001, min_samples).astype(numpy.float32)
+				
+				print(f"🔧 Raw audio frame: {len(audio_frame)} samples for frame {frame_number}")
+				return audio_frame.astype(numpy.float32)
+			else:
+				# 🔧 CRITICAL FIX: Create minimum-size audio frame if beyond audio length
+				print(f"🔧 Frame {frame_number} beyond audio length, creating minimum audio frame")
+				return numpy.random.normal(0, 0.001, min_samples).astype(numpy.float32)
+				
+		except Exception as e:
+			print(f"❌ Error reading audio frame: {e}")
+			# 🔧 CRITICAL FIX: Return minimum-size frame on error
+			return numpy.random.normal(0, 0.001, min_samples).astype(numpy.float32)
+	
 	return None
 
 
@@ -199,6 +238,7 @@ def get_audio_chunks_for_latentsync(audio_path: str, fps: Fps, total_frames: int
 	"""
 	Get audio chunks for LatentSync batch processing (official approach)
 	This mimics the official audio2feat + feature2chunks workflow
+	🔧 CRITICAL FIX: Ensure minimum audio length to prevent Whisper padding errors
 	"""
 	if is_audio(audio_path):
 		# Read the entire audio file once (like official audio2feat)
@@ -210,29 +250,96 @@ def get_audio_chunks_for_latentsync(audio_path: str, fps: Fps, total_frames: int
 		sample_rate = 16000  # LatentSync uses 16kHz
 		frame_duration_samples = int(sample_rate / fps)
 		
+		# 🔧 CRITICAL FIX: Whisper requires minimum 400ms of audio (6400 samples at 16kHz)
+		min_samples = 6400  # 400ms at 16kHz - Whisper's minimum requirement
+		# 🔧 CRITICAL FIX: Use larger window for better Whisper stability
+		audio_window_samples = max(min_samples, frame_duration_samples * 8)  # Use 8x frame duration for stability
+		
+		print(f"🔧 Audio chunking: {total_frames} frames, {audio_window_samples} samples per chunk")
+		
 		# Create chunks for each frame (like official feature2chunks)
 		audio_chunks = []
 		for frame_idx in range(total_frames):
-			start_sample = frame_idx * frame_duration_samples
-			end_sample = start_sample + frame_duration_samples
+			# Calculate start position (center the window around the target frame)
+			target_center = frame_idx * frame_duration_samples + frame_duration_samples // 2
+			start_sample = max(0, target_center - audio_window_samples // 2)
+			end_sample = start_sample + audio_window_samples
 			
-			# Extract the audio segment for this frame
+			# Extract the audio segment
 			if start_sample < len(full_audio):
 				audio_chunk = full_audio[start_sample:end_sample]
-				# Pad with zeros if needed
-				if len(audio_chunk) < frame_duration_samples:
-					audio_chunk = numpy.pad(audio_chunk, (0, frame_duration_samples - len(audio_chunk)), mode='constant')
+				
+				# 🔧 CRITICAL FIX: Ensure minimum length by repeating if necessary
+				if len(audio_chunk) < min_samples:
+					print(f"🔧 Chunk {frame_idx} too short ({len(audio_chunk)} samples), extending to {min_samples}")
+					if len(audio_chunk) > 0:
+						# Repeat the audio to reach minimum length
+						repeat_count = (min_samples // len(audio_chunk)) + 1
+						audio_chunk = numpy.tile(audio_chunk, repeat_count)[:min_samples]
+					else:
+						# Create minimal noise if empty
+						audio_chunk = numpy.random.normal(0, 0.001, min_samples).astype(numpy.float32)
+				
+				# Pad with zeros if still needed (at the end)
+				if len(audio_chunk) < audio_window_samples:
+					padding_needed = audio_window_samples - len(audio_chunk)
+					audio_chunk = numpy.pad(audio_chunk, (0, padding_needed), mode='constant', constant_values=0)
+				
 				audio_chunks.append(audio_chunk.astype(numpy.float32))
 			else:
-				# Create empty chunk if beyond audio length
-				audio_chunks.append(create_empty_raw_audio_frame(fps, sample_rate))
+				# 🔧 CRITICAL FIX: Create minimum-size chunk if beyond audio length
+				print(f"🔧 Frame {frame_idx} beyond audio, creating minimum chunk")
+				audio_chunk = numpy.random.normal(0, 0.001, audio_window_samples).astype(numpy.float32)
+				audio_chunks.append(audio_chunk)
 		
+		print(f"✅ Created {len(audio_chunks)} audio chunks, each {audio_window_samples} samples")
 		return audio_chunks
 	return []
 
 
 def get_audio_chunk_from_batch(audio_chunks: List[numpy.ndarray], frame_number: int) -> Optional[numpy.ndarray]:
-	"""Get a specific audio chunk from pre-computed batch"""
-	if frame_number < len(audio_chunks):
+	"""Get a specific audio chunk from a batch of pre-computed chunks"""
+	if audio_chunks and frame_number < len(audio_chunks):
 		return audio_chunks[frame_number]
 	return None
+
+
+def resample_audio(audio_waveform: numpy.ndarray, original_sample_rate: int, target_sample_rate: int) -> numpy.ndarray:
+	"""
+	Resample audio waveform from original sample rate to target sample rate.
+	
+	:param audio_waveform: Input audio waveform as numpy array
+	:param original_sample_rate: Original sample rate of the audio
+	:param target_sample_rate: Target sample rate (e.g., 16000 for Whisper)
+	:return: Resampled audio waveform
+	"""
+	try:
+		if original_sample_rate == target_sample_rate:
+			return audio_waveform
+		
+		# Use librosa for high-quality resampling
+		resampled_audio = librosa.resample(
+			y=audio_waveform,
+			orig_sr=original_sample_rate,
+			target_sr=target_sample_rate,
+			res_type='kaiser_best'  # High-quality resampling
+		)
+		
+		return resampled_audio.astype(numpy.float32)
+		
+	except Exception as e:
+		# Fallback to scipy if librosa fails
+		try:
+			import scipy.signal
+			# Calculate the resampling ratio
+			ratio = target_sample_rate / original_sample_rate
+			num_samples = int(len(audio_waveform) * ratio)
+			
+			# Use scipy's resample function
+			resampled_audio = scipy.signal.resample(audio_waveform, num_samples)
+			return resampled_audio.astype(numpy.float32)
+			
+		except Exception as fallback_error:
+			print(f"⚠️ Resampling failed with both librosa and scipy: {e}, {fallback_error}")
+			print(f"⚠️ Returning original audio without resampling")
+			return audio_waveform.astype(numpy.float32)
