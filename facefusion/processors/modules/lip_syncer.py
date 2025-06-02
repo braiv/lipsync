@@ -1637,8 +1637,7 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         print(f"   - Range: [{crop_vision_frame.min()}, {crop_vision_frame.max()}]")
         print(f"   - Channel means: R={crop_vision_frame[:,:,0].mean():.1f}, G={crop_vision_frame[:,:,1].mean():.1f}, B={crop_vision_frame[:,:,2].mean():.1f}")
         
-        # 🔧 CRITICAL FIX: Check if color channels are swapped
-        # If the processed face has very different channel distribution, there might be a color issue
+        # 🔧 CRITICAL FIX: Detect and correct color space issues
         processed_r_mean = processed_face[:,:,0].mean()
         processed_g_mean = processed_face[:,:,1].mean()
         processed_b_mean = processed_face[:,:,2].mean()
@@ -1647,67 +1646,158 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         original_g_mean = crop_vision_frame[:,:,1].mean()
         original_b_mean = crop_vision_frame[:,:,2].mean()
         
-        # Check for suspicious color channel patterns (red dominance)
-        if processed_r_mean > processed_g_mean * 1.5 and processed_r_mean > processed_b_mean * 1.5:
-            print("⚠️ DETECTED: Processed face has red channel dominance - possible color space issue")
-            print("🔧 Attempting color channel correction...")
+        # Check for color channel imbalance (blue dominance in your case)
+        color_corrected = False
+        if abs(processed_b_mean - original_b_mean) > 20:  # Blue channel is significantly different
+            print("⚠️ DETECTED: Color channel imbalance - applying correction...")
             
-            # Try swapping channels to fix color issue
-            processed_face_corrected = processed_face.copy()
-            processed_face_corrected[:,:,0] = processed_face[:,:,2]  # R = B
-            processed_face_corrected[:,:,2] = processed_face[:,:,0]  # B = R
-            # G stays the same
+            # Calculate correction factors
+            r_factor = original_r_mean / max(processed_r_mean, 1)
+            g_factor = original_g_mean / max(processed_g_mean, 1)
+            b_factor = original_b_mean / max(processed_b_mean, 1)
+            
+            print(f"🔧 Color correction factors: R={r_factor:.3f}, G={g_factor:.3f}, B={b_factor:.3f}")
+            
+            # Apply color correction
+            processed_face_corrected = processed_face.astype(numpy.float32)
+            processed_face_corrected[:,:,0] *= r_factor
+            processed_face_corrected[:,:,1] *= g_factor
+            processed_face_corrected[:,:,2] *= b_factor
+            processed_face_corrected = numpy.clip(processed_face_corrected, 0, 255).astype(numpy.uint8)
             
             print(f"🔧 After correction - Channel means: R={processed_face_corrected[:,:,0].mean():.1f}, G={processed_face_corrected[:,:,1].mean():.1f}, B={processed_face_corrected[:,:,2].mean():.1f}")
             processed_face = processed_face_corrected
+            color_corrected = True
         
-        # 🔧 CRITICAL FIX: Use more conservative face mask for LatentSync
-        # Instead of create_static_box_mask which is very broad, create a tighter face mask
-        print("🔧 Creating conservative face mask for LatentSync...")
+        # ===== LATENTSYNC TWO-STAGE ALGORITHM =====
+        # Stage 1: Pixel-level masking (mouth region only)
+        print("🔧 LatentSync Stage 1: Creating precise mouth mask...")
         
-        # Create a more conservative mask based on face landmarks
+        # Create mouth mask using landmarks (much more precise than face mask)
+        mouth_mask = create_latentsync_mouth_mask_from_landmarks(crop_vision_frame, face_landmark_68)
+        
+        # Check mouth mask coverage
+        mouth_coverage = numpy.sum(mouth_mask > 0.1) / mouth_mask.size
+        print(f"🔧 Mouth mask coverage: {mouth_coverage:.1%}")
+        
+        if mouth_coverage < 0.005:  # Less than 0.5% coverage
+            print("⚠️ Mouth mask too small, creating fallback mouth region...")
+            mouth_mask = numpy.zeros((512, 512), dtype=numpy.float32)
+            # Create a small mouth region in the lower face
+            center_x, center_y = 256, int(512 * 0.75)  # Lower face area
+            mouth_width, mouth_height = 80, 40  # Small mouth region
+            
+            x1 = max(0, center_x - mouth_width // 2)
+            x2 = min(512, center_x + mouth_width // 2)
+            y1 = max(0, center_y - mouth_height // 2)
+            y2 = min(512, center_y + mouth_height // 2)
+            
+            mouth_mask[y1:y2, x1:x2] = 1.0
+            mouth_mask = cv2.GaussianBlur(mouth_mask, (15, 15), 0)
+            mouth_coverage = numpy.sum(mouth_mask > 0.1) / mouth_mask.size
+            print(f"🔧 Fallback mouth mask coverage: {mouth_coverage:.1%}")
+        
+        # Expand mouth mask to 3 channels for blending
+        mouth_mask_3d = numpy.stack([mouth_mask, mouth_mask, mouth_mask], axis=2)
+        
+        # Stage 1: Blend only the mouth region
+        # result = generated * mask + original * (1 - mask)
+        print("🔧 LatentSync Stage 1: Blending mouth region...")
+        stage1_result = (processed_face.astype(numpy.float32) * mouth_mask_3d + 
+                        crop_vision_frame.astype(numpy.float32) * (1 - mouth_mask_3d))
+        stage1_result = numpy.clip(stage1_result, 0, 255).astype(numpy.uint8)
+        
+        # Debug: Check blending result
+        print(f"🔧 Stage 1 result - Channel means: R={stage1_result[:,:,0].mean():.1f}, G={stage1_result[:,:,1].mean():.1f}, B={stage1_result[:,:,2].mean():.1f}")
+        
+        # 🔧 DEBUG: Save debug images for visualization
+        debug_dir = "/tmp/latentsync_debug"
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        try:
+            # Save original crop frame
+            cv2.imwrite(f"{debug_dir}/01_original_crop.jpg", crop_vision_frame)
+            
+            # Save LatentSync output
+            cv2.imwrite(f"{debug_dir}/02_latentsync_output.jpg", processed_face)
+            
+            # Save mouth mask visualization
+            mouth_mask_vis = (mouth_mask * 255).astype(numpy.uint8)
+            cv2.imwrite(f"{debug_dir}/03_mouth_mask.jpg", mouth_mask_vis)
+            
+            # Save mouth mask overlay on original
+            mouth_overlay = crop_vision_frame.copy()
+            mouth_overlay[:,:,2] = numpy.where(mouth_mask > 0.1, 255, mouth_overlay[:,:,2])  # Red overlay
+            cv2.imwrite(f"{debug_dir}/04_mouth_mask_overlay.jpg", mouth_overlay)
+            
+            # Save Stage 1 result (mouth blended)
+            cv2.imwrite(f"{debug_dir}/05_stage1_mouth_blended.jpg", stage1_result)
+            
+            print(f"🔧 Debug images saved to: {debug_dir}")
+        except Exception as debug_error:
+            print(f"⚠️ Debug image saving failed: {debug_error}")
+        
+        # Stage 2: Face restoration to original video (using broader face mask for seamless integration)
+        print("🔧 LatentSync Stage 2: Creating face restoration mask...")
+        
+        # Create a broader face mask for seamless integration
         face_mask = numpy.zeros((512, 512), dtype=numpy.float32)
         
-        # Use face landmarks to create a tighter face region
-        if len(face_landmark_68) >= 17:  # Ensure we have enough landmarks
-            # Get face contour points (landmarks 0-16 are jaw line)
+        if len(face_landmark_68) >= 17:
+            # Use face contour landmarks (0-16) for face boundary
             face_contour = face_landmark_68[0:17]
             
-            # Create convex hull around face contour
-            hull = cv2.convexHull(face_contour.astype(numpy.int32))
+            # Expand the face contour slightly for better blending
+            center_x = face_contour[:, 0].mean()
+            center_y = face_contour[:, 1].mean()
+            
+            # Expand contour by 10% for smoother blending
+            expanded_contour = face_contour.copy().astype(numpy.float32)
+            expanded_contour[:, 0] = center_x + (expanded_contour[:, 0] - center_x) * 1.1
+            expanded_contour[:, 1] = center_y + (expanded_contour[:, 1] - center_y) * 1.1
+            expanded_contour = numpy.clip(expanded_contour, 0, 511).astype(numpy.int32)
+            
+            # Create convex hull around expanded face contour
+            hull = cv2.convexHull(expanded_contour)
             cv2.fillPoly(face_mask, [hull], 1.0)
             
-            # Apply some erosion to make it more conservative
-            kernel = numpy.ones((15, 15), numpy.uint8)
+            # Apply moderate erosion to avoid edge artifacts
+            kernel = numpy.ones((7, 7), numpy.uint8)
             face_mask = cv2.erode(face_mask, kernel, iterations=1)
             
-            # Apply Gaussian blur for smooth edges
+            # Apply Gaussian blur for smooth blending
             face_mask = cv2.GaussianBlur(face_mask, (21, 21), 0)
             
-            mask_coverage = numpy.sum(face_mask > 0.1) / face_mask.size
-            print(f"🔧 Conservative face mask coverage: {mask_coverage:.1%}")
+            face_coverage = numpy.sum(face_mask > 0.1) / face_mask.size
+            print(f"🔧 Face restoration mask coverage: {face_coverage:.1%}")
             
-            # If mask is too small, fall back to a simple elliptical mask
-            if mask_coverage < 0.15:
-                print("⚠️ Face mask too small, using elliptical fallback...")
-                face_mask = numpy.zeros((512, 512), dtype=numpy.float32)
-                center_x, center_y = 256, 256
-                cv2.ellipse(face_mask, (center_x, center_y), (180, 220), 0, 0, 360, 1.0, -1)
-                face_mask = cv2.GaussianBlur(face_mask, (21, 21), 0)
-                mask_coverage = numpy.sum(face_mask > 0.1) / face_mask.size
-                print(f"🔧 Elliptical mask coverage: {mask_coverage:.1%}")
-        
         else:
-            print("⚠️ Insufficient landmarks, using elliptical face mask...")
-            face_mask = numpy.zeros((512, 512), dtype=numpy.float32)
+            print("⚠️ Using elliptical face mask for restoration...")
             center_x, center_y = 256, 256
             cv2.ellipse(face_mask, (center_x, center_y), (180, 220), 0, 0, 360, 1.0, -1)
             face_mask = cv2.GaussianBlur(face_mask, (21, 21), 0)
-            mask_coverage = numpy.sum(face_mask > 0.1) / face_mask.size
-            print(f"🔧 Elliptical mask coverage: {mask_coverage:.1%}")
+            face_coverage = numpy.sum(face_mask > 0.1) / face_mask.size
+            print(f"🔧 Elliptical face mask coverage: {face_coverage:.1%}")
         
-        print(f"🔧 LatentSync: Pasting back processed face (conservative mask coverage: {numpy.sum(face_mask > 0.1) / face_mask.size:.1%})")
-        return paste_back(temp_vision_frame, processed_face, face_mask, affine_matrix)
+        print(f"🔧 LatentSync: Using mouth-only blending (mouth coverage: {mouth_coverage:.1%})")
+        
+        # 🔧 DEBUG: Save final debug images
+        try:
+            # Save face restoration mask
+            face_mask_vis = (face_mask * 255).astype(numpy.uint8)
+            cv2.imwrite(f"{debug_dir}/06_face_restoration_mask.jpg", face_mask_vis)
+            
+            # Save face mask overlay
+            face_overlay = stage1_result.copy()
+            face_overlay[:,:,1] = numpy.where(face_mask > 0.1, 255, face_overlay[:,:,1])  # Green overlay
+            cv2.imwrite(f"{debug_dir}/07_face_mask_overlay.jpg", face_overlay)
+            
+            print(f"🔧 Final debug images saved. Check {debug_dir} for visualization.")
+        except Exception as debug_error:
+            print(f"⚠️ Final debug image saving failed: {debug_error}")
+        
+        # Use the Stage 1 result (mouth-blended face) for paste-back
+        return paste_back(temp_vision_frame, stage1_result, face_mask, affine_matrix)
     
     else:
         # Traditional Wav2Lip processing with masks and close matrix
