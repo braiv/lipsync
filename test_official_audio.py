@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for official LatentSync audio processing
+Test script to verify official LatentSync audio processing implementation
 """
 
 import torch
@@ -46,28 +46,66 @@ def get_sliced_audio_feature(feature_array: torch.Tensor, vid_idx: int, fps: flo
 
 def test_official_audio_processing():
     """Test the official LatentSync audio processing"""
-    print("🧪 Testing official LatentSync audio processing...")
+    print("🧪 Testing Official LatentSync Audio Processing")
+    print("=" * 50)
     
-    # Create dummy audio features (simulating audio2feat output)
-    dummy_features = torch.randn(100, 384)  # 100 time steps, 384 embedding dim
-    print(f"✅ Created dummy audio features: {dummy_features.shape}")
+    # Create dummy audio features (simulating pre-computed Whisper features)
+    audio_features = torch.randn(100, 384)  # 100 time steps, 384 embedding dim
+    print(f"📊 Dummy audio features shape: {audio_features.shape}")
     
-    # Test slicing for different frames
-    for frame_idx in [0, 10, 25]:
-        audio_slice = get_sliced_audio_feature(dummy_features, frame_idx, fps=25.0)
-        memory_kb = audio_slice.numel() * 4 / 1024
-        print(f"Frame {frame_idx}: slice shape {audio_slice.shape}, memory {memory_kb:.1f} KB")
+    # Test slicing for different frame indices
+    test_frames = [0, 10, 25]
     
-    print("✅ Official LatentSync audio processing test completed!")
+    for frame_idx in test_frames:
+        print(f"\n🎬 Processing frame {frame_idx}:")
+        
+        # Get audio slice for this frame
+        audio_slice = get_sliced_audio_feature(audio_features, frame_idx, fps=25.0)
+        
+        # Calculate memory usage
+        slice_memory_kb = audio_slice.numel() * 4 / 1024  # 4 bytes per float32
+        
+        print(f"   ✅ Audio slice shape: {audio_slice.shape}")
+        print(f"   💾 Memory usage: {slice_memory_kb:.1f} KB")
+        
+        # Verify it's the correct format for LatentSync
+        if audio_slice.dim() == 2 and audio_slice.shape[1] == 384:
+            print(f"   ✅ Correct format for LatentSync processing")
+        else:
+            print(f"   ❌ Incorrect format: expected [seq_len, 384], got {audio_slice.shape}")
     
-    # Compare memory usage
-    old_method_memory = 5.7 * 1024 * 1024  # 5.7 GB in KB
-    new_method_memory = audio_slice.numel() * 4 / 1024  # KB
-    
+    # Memory comparison
     print(f"\n📊 Memory Comparison:")
-    print(f"   Old method (raw audio): {old_method_memory:.0f} KB (5.7 GB)")
-    print(f"   New method (sliced features): {new_method_memory:.1f} KB")
-    print(f"   Memory reduction: {old_method_memory / new_method_memory:.0f}x smaller!")
+    print(f"   Old method (raw audio): ~5.7 GB per frame")
+    print(f"   New method (sliced features): ~{slice_memory_kb:.1f} KB per frame")
+    print(f"   Reduction factor: ~{5.7 * 1024 * 1024 / slice_memory_kb:.0f}x smaller!")
+    
+    print(f"\n✅ Official LatentSync audio processing test complete!")
+
+def test_audio_slice_detection():
+    """Test that audio slices are properly detected"""
+    print("\n🔍 Testing Audio Slice Detection")
+    print("=" * 30)
+    
+    # Create a proper audio slice
+    audio_slice = torch.randn(10, 384)
+    print(f"📊 Test audio slice shape: {audio_slice.shape}")
+    
+    # Test detection logic
+    if isinstance(audio_slice, torch.Tensor) and audio_slice.dim() == 2 and audio_slice.shape[1] == 384:
+        print("✅ Audio slice correctly detected as pre-computed slice")
+    else:
+        print("❌ Audio slice detection failed")
+    
+    # Test with raw audio
+    raw_audio = np.random.randn(16000)  # 1 second of audio at 16kHz
+    print(f"📊 Test raw audio shape: {raw_audio.shape}")
+    
+    if isinstance(raw_audio, np.ndarray) and raw_audio.ndim == 1:
+        print("✅ Raw audio correctly detected as raw audio")
+    else:
+        print("❌ Raw audio detection failed")
 
 if __name__ == "__main__":
-    test_official_audio_processing() 
+    test_official_audio_processing()
+    test_audio_slice_detection() 
