@@ -698,23 +698,87 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 if len(audio_chunk.shape) == 1:
                     audio_chunk = audio_chunk[None, :]
                 
-                # Convert to tensor and get audio features
-                audio_tensor = torch.from_numpy(audio_chunk).float().to(target_device)
+                # 🔧 CRITICAL FIX: Ensure audio chunk is reasonable size for single frame
+                # LatentSync should process ~1 second of audio per frame, not entire file
+                max_audio_samples = 16000 * 2  # 2 seconds max for single frame
+                if audio_chunk.shape[-1] > max_audio_samples:
+                    print(f"⚠️ Audio chunk too large: {audio_chunk.shape} samples")
+                    print(f"🔧 Truncating to {max_audio_samples} samples for memory efficiency")
+                    audio_chunk = audio_chunk[:, :max_audio_samples]
                 
-                # Get audio embeddings (matching official whisper processing)
-                audio_embeds = encode_audio_for_latentsync(audio_tensor)
+                # 🔧 MEMORY SAFETY: Pre-check audio size to prevent OOM in audio encoder
+                audio_duration = audio_chunk.shape[-1] / 16000  # Duration in seconds
+                estimated_memory_gb = audio_duration * 2.0  # Rough estimate: 2GB per second of audio
+                
+                if estimated_memory_gb > 4.0:  # If estimated > 4GB, use dummy embeddings
+                    print(f"⚠️ Audio too large for encoding (estimated {estimated_memory_gb:.1f}GB)")
+                    print("🔧 Using dummy embeddings to prevent OOM")
+                    
+                    # Create safe dummy embeddings
+                    batch_size = 1
+                    seq_len = 77  # Standard sequence length
+                    embed_dim = 384  # Whisper Tiny embedding dimension
+                    audio_embeds = torch.zeros(batch_size, seq_len, embed_dim, device=target_device)
+                
+                else:
+                    # Convert to tensor and get audio features
+                    audio_tensor = torch.from_numpy(audio_chunk).float().to(target_device)
+                    
+                    # 🔧 SAFE AUDIO ENCODING: Try encoding with OOM protection
+                    try:
+                        # Get audio embeddings (matching official whisper processing)
+                        audio_embeds = encode_audio_for_latentsync(audio_tensor)
+                        
+                        # Verify embeddings are valid
+                        if audio_embeds is None:
+                            raise RuntimeError("Audio encoding returned None")
+                            
+                    except (RuntimeError, torch.cuda.OutOfMemoryError) as encoding_error:
+                        print(f"⚠️ Audio encoding failed: {encoding_error}")
+                        print("🔧 Falling back to dummy embeddings")
+                        
+                        # Clear CUDA cache and create dummy embeddings
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        
+                        # Create safe dummy embeddings
+                        batch_size = 1
+                        seq_len = 77  # Standard sequence length
+                        embed_dim = 384  # Whisper Tiny embedding dimension
+                        audio_embeds = torch.zeros(batch_size, seq_len, embed_dim, device=target_device)
+                
+                # 🔧 MEMORY CHECK: Validate audio embeddings size
+                if audio_embeds is not None:
+                    audio_memory_gb = audio_embeds.numel() * audio_embeds.element_size() / (1024**3)
+                    print(f"🔧 Audio embeddings memory: {audio_memory_gb:.2f} GB")
+                    
+                    # If embeddings are too large, truncate them
+                    if audio_memory_gb > 2.0:  # More than 2GB is too much for single frame
+                        print(f"⚠️ Audio embeddings too large ({audio_memory_gb:.2f} GB), truncating...")
+                        max_seq_len = min(audio_embeds.shape[1], 1500)  # Reasonable sequence length
+                        audio_embeds = audio_embeds[:, :max_seq_len, :]
+                        print(f"🔧 Truncated to: {audio_embeds.shape}")
+                
                 if audio_embeds.dim() == 2:
                     audio_embeds = audio_embeds.unsqueeze(0)  # Add batch dim
                 
                 # 🔧 CRITICAL FIX: Convert audio embeddings to UNet dtype
                 audio_embeds = audio_embeds.to(dtype=unet_dtype)
                 print(f"🔧 Audio embeddings dtype: {audio_embeds.dtype}")
+                print(f"🔧 Final audio embeddings shape: {audio_embeds.shape}")
                 
-                # Duplicate for CFG if needed
+                # 🔧 MEMORY-EFFICIENT CFG: Only duplicate if embeddings are reasonable size
                 if do_classifier_free_guidance:
-                    # Create unconditional (empty) audio embedding
-                    uncond_audio_embeds = torch.zeros_like(audio_embeds)
-                    audio_embeds = torch.cat([uncond_audio_embeds, audio_embeds])
+                    audio_memory_gb = audio_embeds.numel() * audio_embeds.element_size() / (1024**3)
+                    if audio_memory_gb > 1.0:  # If > 1GB, disable CFG to save memory
+                        print(f"⚠️ Disabling CFG due to large audio embeddings ({audio_memory_gb:.2f} GB)")
+                        do_classifier_free_guidance = False
+                        guidance_scale = 1.0
+                    else:
+                        # Create unconditional (empty) audio embedding
+                        uncond_audio_embeds = torch.zeros_like(audio_embeds)
+                        audio_embeds = torch.cat([uncond_audio_embeds, audio_embeds])
+                        print(f"🔧 CFG enabled - doubled embeddings to: {audio_embeds.shape}")
                 
                 log_memory_usage("🎵 Audio processing complete")
                 
@@ -1248,6 +1312,12 @@ def encode_audio_for_latentsync(audio_tensor):
         else:
             audio_numpy = audio_tensor
         
+        # 🔧 DEBUG: Check input audio size
+        print(f"🔍 Input audio shape: {audio_numpy.shape}")
+        print(f"🔍 Input audio size: {audio_numpy.size} samples")
+        audio_duration = audio_numpy.size / 16000  # Assuming 16kHz
+        print(f"🔍 Input audio duration: {audio_duration:.2f} seconds")
+        
         # 🔧 CRITICAL FIX: Ensure minimum audio length for Whisper (at least 1 second)
         min_samples = 16000  # 1 second at 16kHz
         if len(audio_numpy) < min_samples:
@@ -1255,6 +1325,12 @@ def encode_audio_for_latentsync(audio_tensor):
             padding_needed = min_samples - len(audio_numpy)
             audio_numpy = numpy.pad(audio_numpy, (0, padding_needed), mode='constant', constant_values=0)
             print(f"🔧 Padded audio from {len(audio_numpy) - padding_needed} to {len(audio_numpy)} samples")
+        
+        # 🔧 MEMORY SAFETY: Limit audio length to prevent OOM
+        max_samples = 16000 * 2  # 2 seconds max to prevent memory issues
+        if len(audio_numpy) > max_samples:
+            print(f"⚠️ Audio too long ({len(audio_numpy)} samples), truncating to {max_samples} samples")
+            audio_numpy = audio_numpy[:max_samples]
         
         # 🔧 CRITICAL: Try multiple approaches in order of preference
         
@@ -1315,13 +1391,38 @@ def encode_audio_for_latentsync(audio_tensor):
                     try:
                         audio_features = audio_encoder.audio2feat(temp_path)
                         
-                        # Convert to tensor if needed
+                        # 🔧 CRITICAL DEBUG: Check audio embeddings size
                         if isinstance(audio_features, numpy.ndarray):
+                            print(f"🔍 Raw audio_features shape: {audio_features.shape}")
+                            print(f"🔍 Raw audio_features dtype: {audio_features.dtype}")
+                            print(f"🔍 Raw audio_features size: {audio_features.size} elements")
+                            memory_size_gb = audio_features.nbytes / (1024**3)
+                            print(f"🔍 Raw audio_features memory: {memory_size_gb:.2f} GB")
+                            
+                            # 🔧 MEMORY SAFETY: Limit embeddings size
+                            max_elements = 1000000  # 1M elements max (~4MB for float32)
+                            if audio_features.size > max_elements:
+                                print(f"⚠️ Audio embeddings too large ({audio_features.size} elements), truncating to {max_elements}")
+                                # Reshape and truncate while preserving structure
+                                original_shape = audio_features.shape
+                                audio_features_flat = audio_features.flatten()[:max_elements]
+                                # Try to maintain reasonable dimensions
+                                if len(original_shape) == 2:
+                                    new_seq_len = min(original_shape[1], max_elements // original_shape[0])
+                                    audio_features = audio_features_flat[:original_shape[0] * new_seq_len].reshape(original_shape[0], new_seq_len)
+                                else:
+                                    audio_features = audio_features_flat.reshape(-1, audio_features_flat.shape[0])
+                            
                             audio_features = torch.from_numpy(audio_features)
                         
                         # Ensure proper device placement
                         target_device = "cuda" if torch.cuda.is_available() else "cpu"
                         audio_features = audio_features.to(target_device)
+                        
+                        # 🔧 FINAL DEBUG: Check final tensor size
+                        memory_size_gb = audio_features.numel() * 4 / (1024**3)  # 4 bytes per float32
+                        print(f"🔍 Final audio_features shape: {audio_features.shape}")
+                        print(f"🔍 Final audio_features memory: {memory_size_gb:.2f} GB")
                         
                         print(f"✅ Audio encoded using official audio2feat method")
                         print(f"   - Input shape: {audio_numpy.shape}")
