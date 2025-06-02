@@ -1071,14 +1071,21 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 
                 decoded_image = vae.decode(latents).sample
                 
+                # 🔧 CRITICAL DEBUG: Check VAE output
+                print(f"🔧 DEBUG - VAE output: shape={decoded_image.shape}, dtype={decoded_image.dtype}, range=[{decoded_image.min():.3f}, {decoded_image.max():.3f}]")
+                
                 # 🔧 CRITICAL FIX: Proper color space normalization
                 # Convert from [-1, 1] to [0, 1] range properly
                 decoded_image = (decoded_image + 1.0) / 2.0
                 decoded_image = decoded_image.clamp(0, 1)
                 
+                print(f"🔧 DEBUG - After normalization: range=[{decoded_image.min():.3f}, {decoded_image.max():.3f}]")
+                
                 # Convert to numpy and ensure proper channel order
                 decoded_image = decoded_image.squeeze(0).permute(1, 2, 0).cpu().numpy()
                 decoded_image = (decoded_image * 255).astype(numpy.uint8)
+                
+                print(f"🔧 DEBUG - After numpy conversion: shape={decoded_image.shape}, dtype={decoded_image.dtype}, range=[{decoded_image.min()}, {decoded_image.max()}]")
                 
                 # 🔧 CRITICAL FIX: Ensure RGB format before conversion
                 # The decoded image should already be in RGB format from VAE
@@ -1089,8 +1096,12 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 decoded_pil = decoded_pil.resize((original_width, original_height), Image.LANCZOS)
                 result_frame = numpy.array(decoded_pil)
                 
+                print(f"🔧 DEBUG - After PIL resize: shape={result_frame.shape}, dtype={result_frame.dtype}, range=[{result_frame.min()}, {result_frame.max()}]")
+                
                 # 🔧 CRITICAL FIX: Convert RGB to BGR for OpenCV compatibility
                 result_frame = cv2.cvtColor(result_frame, cv2.COLOR_RGB2BGR)
+                
+                print(f"🔧 DEBUG - Final result (BGR): shape={result_frame.shape}, dtype={result_frame.dtype}, range=[{result_frame.min()}, {result_frame.max()}]")
                 
                 log_memory_usage("🎨 Frame processing complete")
                 
@@ -1586,6 +1597,25 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         # LatentSync output is already 512x512 - this is the lip-synced face
         latentsync_face = close_vision_frame  # This contains the lip-synced mouth
         
+        # 🔧 CRITICAL DEBUG: Check input data types and ranges
+        print(f"🔧 DEBUG - Original crop frame: shape={crop_vision_frame.shape}, dtype={crop_vision_frame.dtype}, range=[{crop_vision_frame.min()}, {crop_vision_frame.max()}]")
+        print(f"🔧 DEBUG - LatentSync output: shape={latentsync_face.shape}, dtype={latentsync_face.dtype}, range=[{latentsync_face.min()}, {latentsync_face.max()}]")
+        
+        # 🔧 CRITICAL FIX: Ensure both images are in the same format
+        # Convert both to float32 for consistent blending
+        crop_vision_frame_float = crop_vision_frame.astype(numpy.float32)
+        latentsync_face_float = latentsync_face.astype(numpy.float32)
+        
+        # 🔧 CRITICAL FIX: Normalize both to [0, 255] range if needed
+        if crop_vision_frame_float.max() <= 1.0:
+            crop_vision_frame_float = crop_vision_frame_float * 255.0
+        if latentsync_face_float.max() <= 1.0:
+            latentsync_face_float = latentsync_face_float * 255.0
+        
+        print(f"🔧 DEBUG - After normalization:")
+        print(f"   - Original crop: range=[{crop_vision_frame_float.min():.1f}, {crop_vision_frame_float.max():.1f}]")
+        print(f"   - LatentSync: range=[{latentsync_face_float.min():.1f}, {latentsync_face_float.max():.1f}]")
+        
         # Create a precise mouth mask for the transformed face landmarks
         # 🔧 CRITICAL FIX: Use transformed landmarks that match the 512x512 crop coordinates
         # Pass the transformed landmarks directly instead of creating a Face object
@@ -1613,26 +1643,32 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
             print("⚠️ WARNING: Mouth mask has very low coverage - lip sync may not be visible")
             print("🔧 This usually means landmark detection failed or coordinates are wrong")
         
-        # Direct blending: Replace mouth region of original crop with LatentSync output
-        # crop_vision_frame = original face crop (512x512)
-        # latentsync_face = lip-synced face (512x512)
-        # mouth_mask_precise = where to blend (512x512x3)
+        # 🔧 CRITICAL FIX: Proper alpha blending with consistent data types
+        # All operations in float32 space to avoid precision loss
         
         # Blend the mouth region directly
-        blended_crop = crop_vision_frame.astype(numpy.float32) * (1.0 - mouth_mask_precise) + \
-                      latentsync_face.astype(numpy.float32) * mouth_mask_precise
+        blended_crop = crop_vision_frame_float * (1.0 - mouth_mask_precise) + \
+                      latentsync_face_float * mouth_mask_precise
         
-        # Convert back to uint8
+        # 🔧 CRITICAL FIX: Clamp values to valid range and convert back to uint8
+        blended_crop = numpy.clip(blended_crop, 0, 255)
         crop_vision_frame = blended_crop.astype(numpy.uint8)
         
-        print(f"🔧 Blended crop shape: {crop_vision_frame.shape}")
+        print(f"🔧 DEBUG - After blending:")
+        print(f"   - Blended crop: shape={crop_vision_frame.shape}, dtype={crop_vision_frame.dtype}, range=[{crop_vision_frame.min()}, {crop_vision_frame.max()}]")
         print(f"🔧 Blending complete - mouth region should now show lip sync")
+        
+        # 🔧 CRITICAL DEBUG: Check a sample of the mouth region to see if blending worked
+        # Sample the center of the image where the mouth should be
+        center_y, center_x = crop_vision_frame.shape[0] // 2, crop_vision_frame.shape[1] // 2
+        mouth_region_sample = crop_vision_frame[center_y-10:center_y+10, center_x-10:center_x+10]
+        print(f"🔧 DEBUG - Mouth region sample (center): shape={mouth_region_sample.shape}, range=[{mouth_region_sample.min()}, {mouth_region_sample.max()}]")
         
         # Now use the standard paste_back with the blended crop
         # Use the original mouth mask for final paste-back
         crop_mask = numpy.minimum.reduce(crop_masks)
         paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
-        
+    
     else:
         # Traditional Wav2Lip paste-back operation
         crop_vision_frame = cv2.warpAffine(close_vision_frame, cv2.invertAffineTransform(close_matrix), (512, 512), borderMode=cv2.BORDER_REPLICATE)
