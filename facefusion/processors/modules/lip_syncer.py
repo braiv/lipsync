@@ -1000,24 +1000,18 @@ def get_scheduler():
     global scheduler
     if scheduler is None:
         print("📅 Loading DDIM scheduler...")
-        try:
-            # Load scheduler from configs (matching official implementation)
-            scheduler = DDIMScheduler.from_pretrained("configs")
-            print("✅ DDIM scheduler loaded")
-        except Exception as load_error:
-            print(f"⚠️ Failed to load scheduler from configs: {load_error}")
-            # Fallback to default DDIM scheduler
-            scheduler = DDIMScheduler(
-                num_train_timesteps=1000,
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                clip_sample=False,
-                set_alpha_to_one=False,
-                steps_offset=1,
-                prediction_type="epsilon"
-            )
-            print("✅ Default DDIM scheduler loaded")
+        # Use default DDIM scheduler with official LatentSync parameters
+        scheduler = DDIMScheduler(
+            num_train_timesteps=1000,
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            clip_sample=False,
+            set_alpha_to_one=False,
+            steps_offset=1,
+            prediction_type="epsilon"
+        )
+        print("✅ DDIM scheduler loaded with official LatentSync parameters")
     
     return scheduler
 
