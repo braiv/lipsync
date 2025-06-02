@@ -1373,6 +1373,42 @@ def process_frame_wav2lip(source_face: Face, target_frame: VisionFrame, audio_ch
     print("⚠️ Falling back to original frame (Wav2Lip not implemented)")
     return target_frame
 
+def create_latentsync_mouth_mask_from_landmarks(target_frame: VisionFrame, landmarks_68: numpy.ndarray) -> numpy.ndarray:
+    """Create a mouth region mask using transformed landmarks directly"""
+    height, width = target_frame.shape[:2]
+    
+    if landmarks_68 is not None and len(landmarks_68) >= 68:
+        # 🔧 Use FaceFusion's high-quality mouth mask method
+        # Create convex hull around mouth region (same as FaceFusion)
+        convex_hull = cv2.convexHull(landmarks_68[numpy.r_[3:14, 31:36]].astype(numpy.int32))
+        
+        # Create mask at current frame resolution
+        mouth_mask = numpy.zeros((height, width)).astype(numpy.float32)
+        mouth_mask = cv2.fillConvexPoly(mouth_mask, convex_hull, 1.0)
+        
+        # Apply erosion and Gaussian blur (same as FaceFusion)
+        mouth_mask = cv2.erode(mouth_mask.clip(0, 1), numpy.ones((21, 3)))
+        mouth_mask = cv2.GaussianBlur(mouth_mask, (0, 0), sigmaX=1, sigmaY=15)
+        
+        return mouth_mask
+    
+    # Fallback: create a simple rectangular mask in the lower face region
+    mask = numpy.zeros((height, width), dtype=numpy.float32)
+    center_x, center_y = width // 2, int(height * 0.7)
+    mask_width, mask_height = width // 4, height // 6
+    
+    x1 = max(0, center_x - mask_width // 2)
+    x2 = min(width, center_x + mask_width // 2)
+    y1 = max(0, center_y - mask_height // 2)
+    y2 = min(height, center_y + mask_height // 2)
+    
+    mask[y1:y2, x1:x2] = 1.0
+    
+    # Apply some blur to the fallback mask too
+    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=5, sigmaY=5)
+    
+    return mask
+
 def create_latentsync_mouth_mask(target_frame: VisionFrame, target_face: Face) -> numpy.ndarray:
     """Create a mouth region mask for inpainting using FaceFusion's high-quality method"""
     height, width = target_frame.shape[:2]
@@ -1552,12 +1588,8 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         
         # Create a precise mouth mask for the transformed face landmarks
         # 🔧 CRITICAL FIX: Use transformed landmarks that match the 512x512 crop coordinates
-        # Create a temporary face object with transformed landmarks
-        from facefusion.typing import Face
-        temp_face = Face()
-        temp_face.landmark_set = {'68': face_landmark_68}
-        
-        mouth_mask_precise = create_latentsync_mouth_mask(crop_vision_frame, temp_face)
+        # Pass the transformed landmarks directly instead of creating a Face object
+        mouth_mask_precise = create_latentsync_mouth_mask_from_landmarks(crop_vision_frame, face_landmark_68)
         
         # Apply Gaussian blur to the mask for smoother blending
         mouth_mask_precise = cv2.GaussianBlur(mouth_mask_precise, (15, 15), 0)
