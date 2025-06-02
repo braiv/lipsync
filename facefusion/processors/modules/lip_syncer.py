@@ -1069,6 +1069,13 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 
 
 def process_image(source_paths : List[str], target_path : str, output_path : str) -> None:
+	# 🔧 DEBUG: Add debug output to see if process_image is being called
+	print(f"🔍 DEBUG process_image:")
+	print(f"   - source_paths: {source_paths}")
+	print(f"   - target_path: {target_path}")
+	print(f"   - output_path: {output_path}")
+	print(f"   - model: {state_manager.get_item('lip_syncer_model')}")
+	
 	reference_faces = get_reference_faces() if 'reference' in state_manager.get_item('face_selector_mode') else None
 	model_name = state_manager.get_item('lip_syncer_model')
 	
@@ -1076,8 +1083,10 @@ def process_image(source_paths : List[str], target_path : str, output_path : str
 	if model_name == 'latentsync':
 		# Create small empty audio slice for LatentSync (official format)
 		source_audio_frame = torch.zeros(10, 384)  # Official LatentSync slice size
+		print(f"🔍 DEBUG: Created LatentSync audio slice: {source_audio_frame.shape}")
 	else:
 		source_audio_frame = create_empty_audio_frame()
+		print(f"🔍 DEBUG: Created traditional audio frame")
 	
 	target_vision_frame = read_static_image(target_path)
 	output_vision_frame = process_frame_original(
@@ -1090,6 +1099,12 @@ def process_image(source_paths : List[str], target_path : str, output_path : str
 
 
 def process_video(source_paths : List[str], temp_frame_paths : List[str]) -> None:
+	# 🔧 DEBUG: Add debug output to see if process_video is being called
+	print(f"🔍 DEBUG process_video:")
+	print(f"   - source_paths: {source_paths}")
+	print(f"   - temp_frame_paths count: {len(temp_frame_paths) if temp_frame_paths else 0}")
+	print(f"   - model: {state_manager.get_item('lip_syncer_model')}")
+	
 	# 🎵 Pre-load audio for traditional models (Wav2Lip compatibility)
 	source_audio_paths = filter_audio_paths(state_manager.get_item('source_paths'))
 	temp_video_fps = restrict_video_fps(state_manager.get_item('target_path'), state_manager.get_item('output_video_fps'))
@@ -1098,6 +1113,7 @@ def process_video(source_paths : List[str], temp_frame_paths : List[str]) -> Non
 	
 	# 🚀 Note: LatentSync now uses batch audio processing in process_frames()
 	# This improves temporal consistency and matches official LatentSync behavior
+	print(f"🔍 DEBUG: About to call multi_process_frames with process_frames function")
 	processors.multi_process_frames(source_paths, temp_frame_paths, process_frames)
 
 def get_unet_model():
