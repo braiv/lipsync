@@ -1398,40 +1398,42 @@ def process_frame_wav2lip(source_face: Face, target_frame: VisionFrame, audio_ch
     return target_frame
 
 def create_latentsync_mouth_mask_from_landmarks(target_frame: VisionFrame, landmarks_68: numpy.ndarray) -> numpy.ndarray:
-    """Create a mouth region mask using transformed landmarks directly"""
+    """
+    Create a mouth region mask using transformed landmarks directly.
+    This avoids the Face() constructor issue while maintaining the same mask quality.
+    """
     height, width = target_frame.shape[:2]
     
-    if landmarks_68 is not None and len(landmarks_68) >= 68:
-        # 🔧 Use FaceFusion's high-quality mouth mask method
-        # Create convex hull around mouth region (same as FaceFusion)
-        convex_hull = cv2.convexHull(landmarks_68[numpy.r_[3:14, 31:36]].astype(numpy.int32))
-        
-        # Create mask at current frame resolution
-        mouth_mask = numpy.zeros((height, width)).astype(numpy.float32)
-        mouth_mask = cv2.fillConvexPoly(mouth_mask, convex_hull, 1.0)
-        
-        # Apply erosion and Gaussian blur (same as FaceFusion)
-        mouth_mask = cv2.erode(mouth_mask.clip(0, 1), numpy.ones((21, 3)))
-        mouth_mask = cv2.GaussianBlur(mouth_mask, (0, 0), sigmaX=1, sigmaY=15)
-        
+    if landmarks_68 is None or len(landmarks_68) < 68:
+        print("⚠️ No valid landmarks for mouth mask - using fallback")
+        # Fallback: create a simple rectangular mask in the lower face region
+        mouth_mask = numpy.zeros((height, width), dtype=numpy.uint8)
+        mouth_y_start = int(height * 0.6)
+        mouth_y_end = int(height * 0.9)
+        mouth_x_start = int(width * 0.3)
+        mouth_x_end = int(width * 0.7)
+        mouth_mask[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end] = 255
         return mouth_mask
     
-    # Fallback: create a simple rectangular mask in the lower face region
-    mask = numpy.zeros((height, width), dtype=numpy.float32)
-    center_x, center_y = width // 2, int(height * 0.7)
-    mask_width, mask_height = width // 4, height // 6
+    # Create mouth mask using landmarks (same logic as original function)
+    mouth_mask = numpy.zeros((height, width), dtype=numpy.uint8)
     
-    x1 = max(0, center_x - mask_width // 2)
-    x2 = min(width, center_x + mask_width // 2)
-    y1 = max(0, center_y - mask_height // 2)
-    y2 = min(height, center_y + mask_height // 2)
+    # Get mouth landmarks (indices 48-67 in 68-point landmarks)
+    mouth_landmarks = landmarks_68[48:68].astype(numpy.int32)
     
-    mask[y1:y2, x1:x2] = 1.0
+    # Create convex hull around mouth region
+    hull = cv2.convexHull(mouth_landmarks)
+    cv2.fillPoly(mouth_mask, [hull], 255)
     
-    # Apply some blur to the fallback mask too
-    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=5, sigmaY=5)
+    # 🔧 CRITICAL FIX: Apply erosion and Gaussian blur (same as FaceFusion)
+    mouth_mask = cv2.erode(mouth_mask.clip(0, 1), numpy.ones((21, 3)))
+    mouth_mask = cv2.GaussianBlur(mouth_mask, (0, 0), sigmaX=1, sigmaY=15)
     
-    return mask
+    # 🔧 CRITICAL FIX: Resize to target frame size if needed
+    if (height, width) != (512, 512):
+        mouth_mask = cv2.resize(mouth_mask, (width, height), interpolation=cv2.INTER_LINEAR)
+    
+    return mouth_mask
 
 def create_latentsync_mouth_mask(target_frame: VisionFrame, target_face: Face) -> numpy.ndarray:
     """Create a mouth region mask for inpainting using FaceFusion's high-quality method"""
