@@ -309,10 +309,22 @@ def conditional_process() -> ErrorCode:
 		if not processor_module.pre_process('output'):
 			return 2
 	conditional_append_reference_faces()
+	
+	# 🔧 DEBUG: Add debug output to see processing decision
+	target_path = state_manager.get_item('target_path')
+	print(f"🔍 DEBUG conditional_process:")
+	print(f"   - target_path: {target_path}")
+	print(f"   - is_image(target_path): {is_image(target_path)}")
+	print(f"   - is_video(target_path): {is_video(target_path)}")
+	print(f"   - processors: {state_manager.get_item('processors')}")
+	
 	if is_image(state_manager.get_item('target_path')):
+		print(f"🔍 DEBUG: Choosing process_image")
 		return process_image(start_time)
 	if is_video(state_manager.get_item('target_path')):
+		print(f"🔍 DEBUG: Choosing process_video")
 		return process_video(start_time)
+	print(f"🔍 DEBUG: No processing path chosen")
 	return 0
 
 

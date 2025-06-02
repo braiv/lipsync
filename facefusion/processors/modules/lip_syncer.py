@@ -1075,7 +1075,13 @@ def process_image(source_paths : List[str], target_path : str, output_path : str
 	print(f"   - target_path: {target_path}")
 	print(f"   - output_path: {output_path}")
 	print(f"   - model: {state_manager.get_item('lip_syncer_model')}")
-	
+
+	# 🔧 DEBUG: Check file type detection
+	print(f"🔍 DEBUG file type detection:")
+	print(f"   - is_image(target_path): {is_image(target_path)}")
+	print(f"   - is_video(target_path): {is_video(target_path)}")
+	print(f"   - target_path exists: {os.path.exists(target_path)}")
+
 	reference_faces = get_reference_faces() if 'reference' in state_manager.get_item('face_selector_mode') else None
 	model_name = state_manager.get_item('lip_syncer_model')
 	
