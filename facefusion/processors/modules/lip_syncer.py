@@ -1230,8 +1230,21 @@ def encode_audio_for_latentsync(audio_tensor):
                 temp_path = temp_file.name
             
             try:
-                # Write audio to temporary file (16kHz as expected by Whisper)
-                sf.write(temp_path, audio_numpy, 16000)
+                # 🔧 CRITICAL FIX: Ensure proper data type and format for soundfile
+                # Normalize audio to [-1, 1] range for proper WAV format
+                if audio_numpy.dtype != numpy.float32:
+                    audio_numpy = audio_numpy.astype(numpy.float32)
+                
+                # Ensure audio is in proper range for WAV format
+                if numpy.max(numpy.abs(audio_numpy)) > 1.0:
+                    audio_numpy = audio_numpy / numpy.max(numpy.abs(audio_numpy))
+                
+                # Write audio to temporary file with explicit format specification
+                sf.write(temp_path, audio_numpy, 16000, format='WAV', subtype='PCM_16')
+                
+                # Verify file was written correctly
+                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                    raise RuntimeError("Failed to write temporary audio file")
                 
                 # Use official audio2feat method
                 audio_features = audio_encoder.audio2feat(temp_path)
@@ -1250,6 +1263,37 @@ def encode_audio_for_latentsync(audio_tensor):
                 print(f"   - Device: {audio_features.device}")
                 
                 return audio_features
+                
+            except Exception as file_error:
+                print(f"⚠️ File-based audio encoding failed: {file_error}")
+                print("🔄 Trying direct audio encoder approach...")
+                
+                # 🔧 FALLBACK: Try direct audio processing without file
+                try:
+                    # Convert audio to tensor for direct processing
+                    audio_tensor_input = torch.from_numpy(audio_numpy).float()
+                    target_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    audio_tensor_input = audio_tensor_input.to(target_device)
+                    
+                    # Try direct model inference if available
+                    if hasattr(audio_encoder, 'model') and audio_encoder.model is not None:
+                        with torch.no_grad():
+                            # Reshape for Whisper input format [batch, samples]
+                            if audio_tensor_input.dim() == 1:
+                                audio_tensor_input = audio_tensor_input.unsqueeze(0)
+                            
+                            # Use Whisper model directly
+                            audio_features = audio_encoder.model.encode(audio_tensor_input)
+                            
+                            print(f"✅ Audio encoded using direct model approach")
+                            print(f"   - Input shape: {audio_tensor_input.shape}")
+                            print(f"   - Output shape: {audio_features.shape}")
+                            print(f"   - Device: {audio_features.device}")
+                            
+                            return audio_features
+                    
+                except Exception as direct_error:
+                    print(f"⚠️ Direct audio encoding also failed: {direct_error}")
                 
             finally:
                 # Clean up temporary file
