@@ -79,7 +79,7 @@ scheduler = None
 _audio_features_cache = {}  # Cache pre-computed audio features
 
 # 🚀 PERFORMANCE OPTIMIZATION SETTINGS
-PERFORMANCE_MODE = "fast"  # 🔧 CRITICAL FIX: Default to fast mode for 2-4 sec/frame
+PERFORMANCE_MODE = "quality"  # 🔧 CRITICAL FIX: Use quality mode for proper 512x512 resolution matching
 FAST_RESOLUTION = 256  # Use 256x256 for fast mode (matches official benchmarks)
 BALANCED_RESOLUTION = 384  # Use 384x384 for balanced mode
 QUALITY_RESOLUTION = 512  # Use 512x512 for quality mode
@@ -112,7 +112,7 @@ PERFORMANCE_CONFIGS = {
     }
 }
 
-def set_performance_mode(mode: str = "fast"):  # 🔧 CRITICAL FIX: Default to fast
+def set_performance_mode(mode: str = "quality"):  # 🔧 CRITICAL FIX: Default to quality for proper resolution
     """
     Set performance mode for LatentSync processing
     
@@ -121,8 +121,8 @@ def set_performance_mode(mode: str = "fast"):  # 🔧 CRITICAL FIX: Default to f
     """
     global PERFORMANCE_MODE
     if mode not in PERFORMANCE_CONFIGS:
-        print(f"⚠️ Invalid performance mode: {mode}. Using 'fast'")
-        mode = "fast"  # 🔧 CRITICAL FIX: Default to fast instead of balanced
+        print(f"⚠️ Invalid performance mode: {mode}. Using 'quality'")
+        mode = "quality"  # 🔧 CRITICAL FIX: Default to quality for proper resolution
     
     PERFORMANCE_MODE = mode
     config = PERFORMANCE_CONFIGS[mode]
@@ -147,7 +147,7 @@ def get_expected_speed(mode: str) -> str:
 
 def get_performance_config():
     """Get current performance configuration"""
-    return PERFORMANCE_CONFIGS.get(PERFORMANCE_MODE, PERFORMANCE_CONFIGS["fast"])  # 🔧 CRITICAL FIX: Default to fast
+    return PERFORMANCE_CONFIGS.get(PERFORMANCE_MODE, PERFORMANCE_CONFIGS["quality"])  # 🔧 CRITICAL FIX: Default to quality
 
 # 🧹 MEMORY MONITORING FUNCTION
 def log_memory_usage(stage: str = ""):
@@ -1073,6 +1073,19 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 
                 # 🔧 CRITICAL DEBUG: Check VAE output
                 print(f"🔧 DEBUG - VAE output: shape={decoded_image.shape}, dtype={decoded_image.dtype}, range=[{decoded_image.min():.3f}, {decoded_image.max():.3f}]")
+                
+                # 🔧 CRITICAL FIX: Check for resolution mismatch
+                vae_resolution = decoded_image.shape[-1]  # Get width from VAE output
+                expected_resolution = 512  # FaceFusion crop frame resolution
+                
+                if vae_resolution != expected_resolution:
+                    print(f"⚠️ RESOLUTION MISMATCH DETECTED!")
+                    print(f"   - VAE output: {vae_resolution}x{vae_resolution}")
+                    print(f"   - Expected: {expected_resolution}x{expected_resolution}")
+                    print(f"   - This will cause lip size/quality issues when resized")
+                    print(f"🔧 Consider using 'quality' performance mode for native 512x512 processing")
+                else:
+                    print(f"✅ Resolution match: {vae_resolution}x{vae_resolution} (optimal)")
                 
                 # 🔧 CRITICAL FIX: Proper color space normalization
                 # Convert from [-1, 1] to [0, 1] range properly
