@@ -1218,6 +1218,14 @@ def encode_audio_for_latentsync(audio_tensor):
         else:
             audio_numpy = audio_tensor
         
+        # 🔧 CRITICAL FIX: Ensure minimum audio length for Whisper (at least 1 second)
+        min_samples = 16000  # 1 second at 16kHz
+        if len(audio_numpy) < min_samples:
+            # Pad audio to minimum length
+            padding_needed = min_samples - len(audio_numpy)
+            audio_numpy = numpy.pad(audio_numpy, (0, padding_needed), mode='constant', constant_values=0)
+            print(f"🔧 Padded audio from {len(audio_numpy) - padding_needed} to {len(audio_numpy)} samples")
+        
         # 🔧 CRITICAL: Use the official audio2feat method
         if hasattr(audio_encoder, 'audio2feat'):
             # Create temporary audio file for audio2feat method (official approach)
