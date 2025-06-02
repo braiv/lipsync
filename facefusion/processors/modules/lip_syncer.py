@@ -1099,22 +1099,66 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 decoded_image = (decoded_image * 255).astype(numpy.uint8)
                 
                 print(f"🔧 DEBUG - After numpy conversion: shape={decoded_image.shape}, dtype={decoded_image.dtype}, range=[{decoded_image.min()}, {decoded_image.max()}]")
+                print(f"🔧 DEBUG - Channel analysis: R={decoded_image[:,:,0].mean():.1f}, G={decoded_image[:,:,1].mean():.1f}, B={decoded_image[:,:,2].mean():.1f}")
+                
+                # 🔧 CRITICAL FIX: Check for color channel issues in VAE output
+                r_mean = decoded_image[:,:,0].mean()
+                g_mean = decoded_image[:,:,1].mean()
+                b_mean = decoded_image[:,:,2].mean()
+                
+                # If red channel is significantly higher, there might be a color space issue
+                if r_mean > g_mean * 1.3 and r_mean > b_mean * 1.3:
+                    print("⚠️ DETECTED: VAE output has red channel dominance")
+                    print("🔧 Applying color correction at VAE level...")
+                    
+                    # Try RGB to BGR conversion
+                    decoded_image_corrected = cv2.cvtColor(decoded_image, cv2.COLOR_RGB2BGR)
+                    print(f"🔧 After RGB->BGR: R={decoded_image_corrected[:,:,0].mean():.1f}, G={decoded_image_corrected[:,:,1].mean():.1f}, B={decoded_image_corrected[:,:,2].mean():.1f}")
+                    
+                    # Check if this looks more balanced
+                    r_corrected = decoded_image_corrected[:,:,0].mean()
+                    g_corrected = decoded_image_corrected[:,:,1].mean()
+                    b_corrected = decoded_image_corrected[:,:,2].mean()
+                    
+                    # If the corrected version is more balanced, use it
+                    if abs(r_corrected - g_corrected) < abs(r_mean - g_mean):
+                        print("✅ Color correction improved balance, using corrected version")
+                        decoded_image = decoded_image_corrected
+                    else:
+                        print("⚠️ Color correction didn't help, keeping original")
                 
                 # 🔧 CRITICAL FIX: Ensure RGB format before conversion
                 # The decoded image should already be in RGB format from VAE
                 
                 # 14. Resize back to original frame size
                 original_height, original_width = target_frame.shape[:2]
-                decoded_pil = Image.fromarray(decoded_image, mode='RGB')  # Explicitly specify RGB
+                
+                # 🔧 CRITICAL FIX: Ensure we're working with RGB data for PIL
+                if decoded_image.shape[2] == 3:
+                    # Check if this is already BGR (OpenCV format) or RGB (PIL format)
+                    # If we applied BGR correction above, we need to convert back to RGB for PIL
+                    if r_mean > g_mean * 1.3 and r_mean > b_mean * 1.3:
+                        # We likely corrected to BGR, so convert back to RGB for PIL
+                        decoded_image_for_pil = cv2.cvtColor(decoded_image, cv2.COLOR_BGR2RGB)
+                        print("🔧 Converting BGR back to RGB for PIL processing")
+                    else:
+                        decoded_image_for_pil = decoded_image
+                        print("🔧 Using original RGB for PIL processing")
+                else:
+                    decoded_image_for_pil = decoded_image
+                
+                decoded_pil = Image.fromarray(decoded_image_for_pil, mode='RGB')  # Explicitly specify RGB
                 decoded_pil = decoded_pil.resize((original_width, original_height), Image.LANCZOS)
                 result_frame = numpy.array(decoded_pil)
                 
                 print(f"🔧 DEBUG - After PIL resize: shape={result_frame.shape}, dtype={result_frame.dtype}, range=[{result_frame.min()}, {result_frame.max()}]")
+                print(f"🔧 DEBUG - PIL output channels: R={result_frame[:,:,0].mean():.1f}, G={result_frame[:,:,1].mean():.1f}, B={result_frame[:,:,2].mean():.1f}")
                 
                 # 🔧 CRITICAL FIX: Convert RGB to BGR for OpenCV compatibility
                 result_frame = cv2.cvtColor(result_frame, cv2.COLOR_RGB2BGR)
                 
                 print(f"🔧 DEBUG - Final result (BGR): shape={result_frame.shape}, dtype={result_frame.dtype}, range=[{result_frame.min()}, {result_frame.max()}]")
+                print(f"🔧 DEBUG - Final BGR channels: B={result_frame[:,:,0].mean():.1f}, G={result_frame[:,:,1].mean():.1f}, R={result_frame[:,:,2].mean():.1f}")
                 
                 log_memory_usage("🎨 Frame processing complete")
                 
@@ -1579,12 +1623,90 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
             print(f"⚠️ Unexpected LatentSync output shape: {processed_face.shape}")
             return temp_vision_frame
         
-        # Simple paste-back with clean face mask (no mouth-specific processing needed)
-        face_mask = create_static_box_mask(processed_face.shape[:2][::-1], 
-                                         state_manager.get_item('face_mask_blur'), 
-                                         state_manager.get_item('face_mask_padding'))
+        # 🔧 CRITICAL DEBUG: Check color channels
+        print(f"🔧 DEBUG - LatentSync output analysis:")
+        print(f"   - Shape: {processed_face.shape}")
+        print(f"   - Dtype: {processed_face.dtype}")
+        print(f"   - Range: [{processed_face.min()}, {processed_face.max()}]")
+        print(f"   - Channel means: R={processed_face[:,:,0].mean():.1f}, G={processed_face[:,:,1].mean():.1f}, B={processed_face[:,:,2].mean():.1f}")
         
-        print(f"🔧 LatentSync: Pasting back processed face (mask coverage: {numpy.sum(face_mask > 0.1) / face_mask.size:.1%})")
+        # 🔧 CRITICAL DEBUG: Check original crop frame
+        print(f"🔧 DEBUG - Original crop frame analysis:")
+        print(f"   - Shape: {crop_vision_frame.shape}")
+        print(f"   - Dtype: {crop_vision_frame.dtype}")
+        print(f"   - Range: [{crop_vision_frame.min()}, {crop_vision_frame.max()}]")
+        print(f"   - Channel means: R={crop_vision_frame[:,:,0].mean():.1f}, G={crop_vision_frame[:,:,1].mean():.1f}, B={crop_vision_frame[:,:,2].mean():.1f}")
+        
+        # 🔧 CRITICAL FIX: Check if color channels are swapped
+        # If the processed face has very different channel distribution, there might be a color issue
+        processed_r_mean = processed_face[:,:,0].mean()
+        processed_g_mean = processed_face[:,:,1].mean()
+        processed_b_mean = processed_face[:,:,2].mean()
+        
+        original_r_mean = crop_vision_frame[:,:,0].mean()
+        original_g_mean = crop_vision_frame[:,:,1].mean()
+        original_b_mean = crop_vision_frame[:,:,2].mean()
+        
+        # Check for suspicious color channel patterns (red dominance)
+        if processed_r_mean > processed_g_mean * 1.5 and processed_r_mean > processed_b_mean * 1.5:
+            print("⚠️ DETECTED: Processed face has red channel dominance - possible color space issue")
+            print("🔧 Attempting color channel correction...")
+            
+            # Try swapping channels to fix color issue
+            processed_face_corrected = processed_face.copy()
+            processed_face_corrected[:,:,0] = processed_face[:,:,2]  # R = B
+            processed_face_corrected[:,:,2] = processed_face[:,:,0]  # B = R
+            # G stays the same
+            
+            print(f"🔧 After correction - Channel means: R={processed_face_corrected[:,:,0].mean():.1f}, G={processed_face_corrected[:,:,1].mean():.1f}, B={processed_face_corrected[:,:,2].mean():.1f}")
+            processed_face = processed_face_corrected
+        
+        # 🔧 CRITICAL FIX: Use more conservative face mask for LatentSync
+        # Instead of create_static_box_mask which is very broad, create a tighter face mask
+        print("🔧 Creating conservative face mask for LatentSync...")
+        
+        # Create a more conservative mask based on face landmarks
+        face_mask = numpy.zeros((512, 512), dtype=numpy.float32)
+        
+        # Use face landmarks to create a tighter face region
+        if len(face_landmark_68) >= 17:  # Ensure we have enough landmarks
+            # Get face contour points (landmarks 0-16 are jaw line)
+            face_contour = face_landmark_68[0:17]
+            
+            # Create convex hull around face contour
+            hull = cv2.convexHull(face_contour.astype(numpy.int32))
+            cv2.fillPoly(face_mask, [hull], 1.0)
+            
+            # Apply some erosion to make it more conservative
+            kernel = numpy.ones((15, 15), numpy.uint8)
+            face_mask = cv2.erode(face_mask, kernel, iterations=1)
+            
+            # Apply Gaussian blur for smooth edges
+            face_mask = cv2.GaussianBlur(face_mask, (21, 21), 0)
+            
+            mask_coverage = numpy.sum(face_mask > 0.1) / face_mask.size
+            print(f"🔧 Conservative face mask coverage: {mask_coverage:.1%}")
+            
+            # If mask is too small, fall back to a simple elliptical mask
+            if mask_coverage < 0.15:
+                print("⚠️ Face mask too small, using elliptical fallback...")
+                face_mask = numpy.zeros((512, 512), dtype=numpy.float32)
+                center_x, center_y = 256, 256
+                cv2.ellipse(face_mask, (center_x, center_y), (180, 220), 0, 0, 360, 1.0, -1)
+                face_mask = cv2.GaussianBlur(face_mask, (21, 21), 0)
+                mask_coverage = numpy.sum(face_mask > 0.1) / face_mask.size
+                print(f"🔧 Elliptical mask coverage: {mask_coverage:.1%}")
+        
+        else:
+            print("⚠️ Insufficient landmarks, using elliptical face mask...")
+            face_mask = numpy.zeros((512, 512), dtype=numpy.float32)
+            center_x, center_y = 256, 256
+            cv2.ellipse(face_mask, (center_x, center_y), (180, 220), 0, 0, 360, 1.0, -1)
+            face_mask = cv2.GaussianBlur(face_mask, (21, 21), 0)
+            mask_coverage = numpy.sum(face_mask > 0.1) / face_mask.size
+            print(f"🔧 Elliptical mask coverage: {mask_coverage:.1%}")
+        
+        print(f"🔧 LatentSync: Pasting back processed face (conservative mask coverage: {numpy.sum(face_mask > 0.1) / face_mask.size:.1%})")
         return paste_back(temp_vision_frame, processed_face, face_mask, affine_matrix)
     
     else:
