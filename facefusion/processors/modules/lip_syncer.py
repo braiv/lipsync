@@ -819,6 +819,21 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 # 🔧 CRITICAL FIX: Handle both pre-computed slices and raw audio
                 print("🎵 Processing audio...")
                 
+                # 🔧 CRITICAL DEBUG: Check audio input quality
+                print(f"🔧 DEBUG - Audio input analysis:")
+                if isinstance(audio_chunk, torch.Tensor):
+                    print(f"   - Type: torch.Tensor")
+                    print(f"   - Shape: {audio_chunk.shape}")
+                    print(f"   - Dtype: {audio_chunk.dtype}")
+                    if audio_chunk.dim() == 2 and audio_chunk.shape[1] == 384:
+                        print(f"   - Pre-computed audio slice detected")
+                        print(f"   - Mean: {audio_chunk.mean():.4f}, Std: {audio_chunk.std():.4f}")
+                        print(f"   - Range: [{audio_chunk.min():.4f}, {audio_chunk.max():.4f}]")
+                    else:
+                        print(f"   - Raw audio tensor")
+                        if audio_chunk.numel() > 0:
+                            print(f"   - Mean: {audio_chunk.mean():.4f}, Std: {audio_chunk.std():.4f}")
+                
                 if isinstance(audio_chunk, torch.Tensor) and audio_chunk.dim() == 2 and audio_chunk.shape[1] == 384:
                     # This is a pre-computed audio slice - use directly
                     print(f"✅ Using pre-computed audio slice: {audio_chunk.shape}")
@@ -831,6 +846,26 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                     
                     if len(audio_chunk.shape) == 1:
                         audio_chunk = audio_chunk[None, :]
+                    
+                    # 🔧 CRITICAL DEBUG: Check raw audio quality
+                    print(f"🔧 DEBUG - Raw audio analysis:")
+                    print(f"   - Shape: {audio_chunk.shape}")
+                    print(f"   - Duration: {audio_chunk.shape[-1] / 16000:.2f} seconds")
+                    print(f"   - Mean: {audio_chunk.mean():.4f}, Std: {audio_chunk.std():.4f}")
+                    print(f"   - Range: [{audio_chunk.min():.4f}, {audio_chunk.max():.4f}]")
+                    
+                    # Check if audio is silent or very quiet
+                    audio_rms = numpy.sqrt(numpy.mean(audio_chunk**2))
+                    print(f"   - RMS: {audio_rms:.6f}")
+                    
+                    if audio_rms < 0.001:
+                        print("⚠️ WARNING: Audio appears to be silent or very quiet!")
+                        print("🔧 This may result in no lip movement")
+                    elif audio_rms > 0.1:
+                        print("⚠️ WARNING: Audio appears to be very loud!")
+                        print("🔧 This may cause excessive lip movement")
+                    else:
+                        print("✅ Audio level appears normal")
                     
                     # 🔧 CRITICAL FIX: Ensure audio chunk is reasonable size for single frame
                     max_audio_samples = 16000 * 2  # 2 seconds max for single frame
@@ -846,6 +881,7 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                     if estimated_memory_gb > 4.0:  # If estimated > 4GB, use dummy embeddings
                         print(f"⚠️ Audio too large for encoding (estimated {estimated_memory_gb:.1f}GB)")
                         print("🔧 Using dummy embeddings to prevent OOM")
+                        print("⚠️ WARNING: Dummy embeddings will result in NO lip sync!")
                         
                         # Create safe dummy embeddings
                         batch_size = 1
@@ -885,6 +921,23 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                     audio_memory_gb = audio_embeds.numel() * audio_embeds.element_size() / (1024**3)
                     print(f"🔧 Audio embeddings memory: {audio_memory_gb:.2f} GB")
                     
+                    # 🔧 CRITICAL DEBUG: Analyze audio embeddings quality
+                    print(f"🔧 DEBUG - Audio embeddings analysis:")
+                    print(f"   - Shape: {audio_embeds.shape}")
+                    print(f"   - Dtype: {audio_embeds.dtype}")
+                    print(f"   - Mean: {audio_embeds.mean():.6f}, Std: {audio_embeds.std():.6f}")
+                    print(f"   - Range: [{audio_embeds.min():.6f}, {audio_embeds.max():.6f}]")
+                    
+                    # Check if embeddings are meaningful (not all zeros or constant)
+                    if torch.all(audio_embeds == 0):
+                        print("⚠️ CRITICAL: Audio embeddings are all zeros!")
+                        print("🔧 This will result in NO lip sync movement")
+                    elif audio_embeds.std() < 0.001:
+                        print("⚠️ WARNING: Audio embeddings have very low variance!")
+                        print("🔧 This may result in minimal lip sync movement")
+                    else:
+                        print("✅ Audio embeddings appear to have meaningful content")
+                    
                     # 🔧 CRITICAL FIX: Reshape audio embeddings for UNet compatibility
                     # The UNet expects [batch, seq_len, embed_dim] format
                     if audio_embeds.dim() == 3 and audio_embeds.shape[0] > 1:
@@ -922,6 +975,12 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                         uncond_audio_embeds = torch.zeros_like(audio_embeds)
                         audio_embeds = torch.cat([uncond_audio_embeds, audio_embeds])
                         print(f"🔧 CFG enabled - doubled embeddings to: {audio_embeds.shape}")
+                        
+                        # 🔧 CRITICAL DEBUG: Check CFG embeddings
+                        print(f"🔧 DEBUG - CFG embeddings analysis:")
+                        print(f"   - Unconditional part mean: {audio_embeds[:1].mean():.6f}")
+                        print(f"   - Conditional part mean: {audio_embeds[1:].mean():.6f}")
+                        print(f"   - Difference: {(audio_embeds[1:] - audio_embeds[:1]).mean():.6f}")
                 
                 log_memory_usage("🎵 Audio processing complete")
                 
@@ -1052,10 +1111,45 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                         encoder_hidden_states=audio_embeds_input
                     ).sample
                     
+                    # 🔧 CRITICAL DEBUG: Check UNet output quality
+                    if i == 0:  # Only debug first step to avoid spam
+                        print(f"🔧 DEBUG - UNet output analysis (step 1):")
+                        print(f"   - Shape: {noise_pred.shape}")
+                        print(f"   - Dtype: {noise_pred.dtype}")
+                        print(f"   - Mean: {noise_pred.mean():.6f}, Std: {noise_pred.std():.6f}")
+                        print(f"   - Range: [{noise_pred.min():.6f}, {noise_pred.max():.6f}]")
+                        
+                        # Check if UNet is producing meaningful predictions
+                        if torch.all(noise_pred == 0):
+                            print("⚠️ CRITICAL: UNet output is all zeros!")
+                            print("🔧 This indicates a model loading or processing issue")
+                        elif noise_pred.std() < 0.001:
+                            print("⚠️ WARNING: UNet output has very low variance!")
+                            print("🔧 This may indicate poor audio conditioning")
+                        else:
+                            print("✅ UNet output appears to have meaningful content")
+                    
                     # Apply classifier-free guidance
                     if do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                        
+                        # 🔧 CRITICAL DEBUG: Check CFG effect
+                        if i == 0:  # Only debug first step
+                            print(f"🔧 DEBUG - CFG effect analysis:")
+                            print(f"   - Unconditional mean: {noise_pred_uncond.mean():.6f}")
+                            print(f"   - Conditional mean: {noise_pred_text.mean():.6f}")
+                            print(f"   - Difference: {(noise_pred_text - noise_pred_uncond).mean():.6f}")
+                            print(f"   - Final guided mean: {noise_pred.mean():.6f}")
+                            
+                            cfg_effect = (noise_pred_text - noise_pred_uncond).abs().mean()
+                            print(f"   - CFG effect magnitude: {cfg_effect:.6f}")
+                            
+                            if cfg_effect < 0.001:
+                                print("⚠️ WARNING: CFG has minimal effect!")
+                                print("🔧 Audio conditioning may not be working properly")
+                            else:
+                                print("✅ CFG is having meaningful effect")
                     
                     # Scheduler step (official denoising)
                     latents = scheduler.step(noise_pred, t, latents).prev_sample
@@ -1109,6 +1203,39 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 
                 print(f"🔧 DEBUG - After numpy conversion: shape={decoded_image.shape}, dtype={decoded_image.dtype}, range=[{decoded_image.min()}, {decoded_image.max()}]")
                 print(f"🔧 DEBUG - Channel analysis: R={decoded_image[:,:,0].mean():.1f}, G={decoded_image[:,:,1].mean():.1f}, B={decoded_image[:,:,2].mean():.1f}")
+                
+                # 🔧 CRITICAL DEBUG: Compare original vs processed in mouth region
+                target_frame_rgb = cv2.cvtColor(target_frame, cv2.COLOR_BGR2RGB)
+                target_resized = cv2.resize(target_frame_rgb, (decoded_image.shape[1], decoded_image.shape[0]))
+                
+                # Calculate difference in mouth region (approximate)
+                mouth_y_start = int(decoded_image.shape[0] * 0.6)
+                mouth_y_end = int(decoded_image.shape[0] * 0.9)
+                mouth_x_start = int(decoded_image.shape[1] * 0.3)
+                mouth_x_end = int(decoded_image.shape[1] * 0.7)
+                
+                original_mouth = target_resized[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end]
+                processed_mouth = decoded_image[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end]
+                
+                mouth_diff = numpy.abs(processed_mouth.astype(float) - original_mouth.astype(float)).mean()
+                print(f"🔧 DEBUG - Mouth region analysis:")
+                print(f"   - Original mouth mean: {original_mouth.mean():.1f}")
+                print(f"   - Processed mouth mean: {processed_mouth.mean():.1f}")
+                print(f"   - Mouth region difference: {mouth_diff:.1f}")
+                
+                if mouth_diff < 5.0:
+                    print("⚠️ CRITICAL: Very small difference in mouth region!")
+                    print("🔧 LatentSync may not be generating lip movement")
+                    print("🔧 Possible causes:")
+                    print("   - Silent or low-quality audio")
+                    print("   - Audio embeddings are zeros/constant")
+                    print("   - UNet not responding to audio conditioning")
+                    print("   - Model weights not loaded correctly")
+                elif mouth_diff > 50.0:
+                    print("⚠️ WARNING: Very large difference in mouth region!")
+                    print("🔧 This may indicate color space issues or over-processing")
+                else:
+                    print("✅ Reasonable difference in mouth region - lip sync may be working")
                 
                 # 🔧 CRITICAL FIX: Check for color channel issues in VAE output
                 r_mean = decoded_image[:,:,0].mean()
