@@ -661,134 +661,26 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
     model_name = state_manager.get_item('lip_syncer_model')
     
     if model_name == 'latentsync':
-        # 🔧 CRITICAL FIX: AudioFrame contains mel-spectrogram, not raw audio!
-        # LatentSync needs raw audio waveform, not mel-spectrogram
-        
-        print(f"🔧 DEBUG - AudioFrame analysis:")
+        # 🔧 DEBUG: Check what type of audio we're receiving
+        print(f"🔧 LatentSync forward() received:")
         print(f"   - Type: {type(temp_audio_frame)}")
         print(f"   - Shape: {temp_audio_frame.shape if hasattr(temp_audio_frame, 'shape') else 'No shape'}")
         
-        # 🚨 CRITICAL: AudioFrame is mel-spectrogram for Wav2Lip, but LatentSync needs raw audio
-        # We need to get the original raw audio instead of using the processed mel-spectrogram
-        
         if isinstance(temp_audio_frame, torch.Tensor) and temp_audio_frame.dim() == 2 and temp_audio_frame.shape[1] == 384:
             # This is a pre-computed audio slice from the official method - pass it directly
-            print(f"✅ Forward: Using pre-computed audio slice {temp_audio_frame.shape}")
+            print(f"✅ Forward: Using pre-computed LatentSync audio slice {temp_audio_frame.shape}")
             audio_input = temp_audio_frame
         elif isinstance(temp_audio_frame, numpy.ndarray) and temp_audio_frame.ndim == 1:
             # This is raw audio waveform - perfect for LatentSync
             print(f"✅ Forward: Using raw audio waveform {temp_audio_frame.shape}")
             audio_input = temp_audio_frame
         else:
-            # 🚨 CRITICAL ISSUE: AudioFrame is mel-spectrogram, not raw audio!
-            print("🚨 CRITICAL: AudioFrame contains mel-spectrogram, not raw audio!")
-            print("🔧 LatentSync requires raw audio waveform, not mel-spectrogram")
-            print("🔧 This explains why audio input is silent - we're processing the wrong data!")
-            
-            # 🔧 CRITICAL FIX: Try to get raw audio from source
-            try:
-                # Get the source audio path from state manager
-                source_paths = state_manager.get_item('source_paths') or []
-                source_audio_path = None
-                
-                for path in source_paths:
-                    print(f"🔧 DEBUG sync_lip: checking path = {path}")
-                    print(f"🔧 DEBUG sync_lip: path exists = {os.path.exists(path) if path else False}")
-                    
-                    # 🔧 CRITICAL FIX: More lenient audio detection for temp files
-                    is_audio_file = False
-                    if path and os.path.exists(path):
-                        # Try strict audio detection first
-                        if has_audio([path]):
-                            is_audio_file = True
-                            print(f"🔧 DEBUG sync_lip: has_audio() = True")
-                        else:
-                            # Fallback: Check file extension for temp files
-                            audio_extensions = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac']
-                            file_ext = os.path.splitext(path)[1].lower()
-                            if file_ext in audio_extensions:
-                                is_audio_file = True
-                                print(f"🔧 DEBUG sync_lip: has_audio() = False, but extension {file_ext} suggests audio file")
-                            else:
-                                print(f"🔧 DEBUG sync_lip: has_audio() = False, extension {file_ext} not recognized")
-                    
-                    if is_audio_file:
-                        source_audio_path = path
-                        print(f"🔧 DEBUG sync_lip: found audio path = {path}")
-                        break
-                
-                if source_audio_path:
-                    print(f"🔧 Extracting raw audio from: {source_audio_path}")
-                    
-                    # 🔧 DEBUG: Check if file exists and get basic info
-                    if not os.path.exists(source_audio_path):
-                        print(f"❌ Audio file does not exist: {source_audio_path}")
-                        raise FileNotFoundError(f"Audio file not found: {source_audio_path}")
-                    
-                    file_size = os.path.getsize(source_audio_path)
-                    print(f"🔧 Audio file info: size={file_size} bytes, exists={os.path.exists(source_audio_path)}")
-                    
-                    # Read raw audio at 16kHz for LatentSync
-                    try:
-                        audio_data, sample_rate = sf.read(source_audio_path)
-                        print(f"🔧 Raw audio loaded: shape={audio_data.shape}, sample_rate={sample_rate}, dtype={audio_data.dtype}")
-                        print(f"🔧 Raw audio stats: mean={audio_data.mean():.6f}, std={audio_data.std():.6f}, range=[{audio_data.min():.6f}, {audio_data.max():.6f}]")
-                        
-                        # Check if audio is actually silent
-                        audio_rms = numpy.sqrt(numpy.mean(audio_data**2))
-                        print(f"🔧 Raw audio RMS: {audio_rms:.6f}")
-                        
-                        if audio_rms < 0.001:
-                            print(f"⚠️ WARNING: Source audio file appears to be silent!")
-                            print(f"🔧 This may be the root cause of the lip sync issue")
-                        
-                    except Exception as read_error:
-                        print(f"❌ Failed to read audio file: {read_error}")
-                        raise read_error
-                        
-                    # Ensure mono
-                    if len(audio_data.shape) > 1:
-                        print(f"🔧 Converting from {audio_data.shape} to mono")
-                        audio_data = numpy.mean(audio_data, axis=1)
-                    
-                    # Resample to 16kHz if needed
-                    if sample_rate != 16000:
-                        print(f"🔧 Resampling from {sample_rate}Hz to 16000Hz")
-                        audio_data = resample_audio(audio_data, sample_rate, 16000)
-                    
-                    # Use a reasonable chunk size (1 second)
-                    chunk_size = 16000
-                    if len(audio_data) > chunk_size:
-                        # Take first second of audio
-                        print(f"🔧 Truncating audio from {len(audio_data)} to {chunk_size} samples")
-                        audio_data = audio_data[:chunk_size]
-                    elif len(audio_data) < chunk_size:
-                        # Pad with zeros if too short
-                        print(f"🔧 Padding audio from {len(audio_data)} to {chunk_size} samples")
-                        audio_data = numpy.pad(audio_data, (0, chunk_size - len(audio_data)), mode='constant')
-                    
-                    audio_input = audio_data.astype(numpy.float32)
-                    
-                    print(f"✅ Successfully extracted raw audio:")
-                    print(f"   - Shape: {audio_input.shape}")
-                    print(f"   - Duration: {len(audio_input) / 16000:.2f} seconds")
-                    print(f"   - RMS: {numpy.sqrt(numpy.mean(audio_input**2)):.6f}")
-                    
-                    # Verify audio is not silent
-                    if numpy.sqrt(numpy.mean(audio_input**2)) < 0.001:
-                        print(f"⚠️ WARNING: Extracted audio appears silent!")
-                        print(f"🔧 This confirms the source audio file is silent or very quiet")
-                        print(f"🔧 Lip sync will not work with silent audio")
-                    else:
-                        print(f"✅ Audio extraction successful - non-silent audio detected")
-                        
-                else:
-                    raise RuntimeError("No audio source found in source_paths")
-                    
-            except Exception as audio_error:
-                print(f"❌ Raw audio extraction failed: {audio_error}")
-                print(f"🔧 Creating dummy audio - NO LIP SYNC will occur!")
-                audio_input = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence
+            # 🚨 This should NOT happen with the new process_frames logic!
+            print(f"🚨 ERROR: LatentSync received unexpected audio format!")
+            print(f"   - Type: {type(temp_audio_frame)}")
+            print(f"   - Shape: {temp_audio_frame.shape if hasattr(temp_audio_frame, 'shape') else 'No shape'}")
+            print(f"🔧 Creating dummy audio to prevent crash")
+            audio_input = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence
         
         # Pass the audio input to process_frame_latentsync for proper handling
         return process_frame_latentsync(target_face, close_vision_frame, audio_input)
@@ -1528,15 +1420,23 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 				else:
 					print(f"✅ Got raw audio for frame {frame_number}: shape {source_audio_frame.shape}, RMS {numpy.sqrt(numpy.mean(source_audio_frame**2)):.6f}")
 		
-		# 🔧 CRITICAL: Ensure we never pass None or empty audio to LatentSync
-		if model_name == 'latentsync' and source_audio_frame is None:
-			source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)
-		elif model_name != 'latentsync':
-			# Traditional Wav2Lip: Use mel-spectrogram processing
+		# 🔧 CRITICAL FIX: Completely separate audio processing - NO SHARED LOGIC
+		if model_name == "latentsync":
+			# ✅ LATENTSYNC PATH: Ensure we never pass None audio to LatentSync
 			if source_audio_frame is None:
+				print(f"⚠️ LatentSync Frame {frame_number}: source_audio_frame was None, creating dummy audio")
+				source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence
+		else:
+			# ✅ TRADITIONAL PATH: Use mel-spectrogram processing for non-LatentSync models
+			if source_audio_frame is None:
+				print(f"🔍 Traditional Frame {frame_number}: Getting mel-spectrogram from get_voice_frame")
 				source_audio_frame = get_voice_frame(source_audio_path, temp_video_fps, frame_number)
-			if not numpy.any(source_audio_frame):
+			
+			if source_audio_frame is None or not numpy.any(source_audio_frame):
+				print(f"🔍 Traditional Frame {frame_number}: Creating empty mel-spectrogram frame")
 				source_audio_frame = create_empty_audio_frame()
+			else:
+				print(f"🔍 Traditional Frame {frame_number}: Using mel-spectrogram frame {source_audio_frame.shape}")
 		
 		target_vision_frame = read_image(target_vision_path)
 		output_vision_frame = process_frame_original(
