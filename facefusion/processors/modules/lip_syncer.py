@@ -661,17 +661,83 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
     model_name = state_manager.get_item('lip_syncer_model')
     
     if model_name == 'latentsync':
-        # 🔧 CRITICAL FIX: Handle pre-computed audio slices properly
+        # 🔧 CRITICAL FIX: AudioFrame contains mel-spectrogram, not raw audio!
+        # LatentSync needs raw audio waveform, not mel-spectrogram
+        
+        print(f"🔧 DEBUG - AudioFrame analysis:")
+        print(f"   - Type: {type(temp_audio_frame)}")
+        print(f"   - Shape: {temp_audio_frame.shape if hasattr(temp_audio_frame, 'shape') else 'No shape'}")
+        
+        # 🚨 CRITICAL: AudioFrame is mel-spectrogram for Wav2Lip, but LatentSync needs raw audio
+        # We need to get the original raw audio instead of using the processed mel-spectrogram
+        
         if isinstance(temp_audio_frame, torch.Tensor) and temp_audio_frame.dim() == 2 and temp_audio_frame.shape[1] == 384:
             # This is a pre-computed audio slice from the official method - pass it directly
             print(f"✅ Forward: Using pre-computed audio slice {temp_audio_frame.shape}")
             audio_input = temp_audio_frame
-        elif isinstance(temp_audio_frame, numpy.ndarray):
-            # This is raw audio - convert to tensor but keep as raw audio
+        elif isinstance(temp_audio_frame, numpy.ndarray) and temp_audio_frame.ndim == 1:
+            # This is raw audio waveform - perfect for LatentSync
+            print(f"✅ Forward: Using raw audio waveform {temp_audio_frame.shape}")
             audio_input = temp_audio_frame
         else:
-            # Convert from AudioFrame format to raw audio
-            audio_input = temp_audio_frame.flatten() if hasattr(temp_audio_frame, 'flatten') else temp_audio_frame
+            # 🚨 CRITICAL ISSUE: AudioFrame is mel-spectrogram, not raw audio!
+            print("🚨 CRITICAL: AudioFrame contains mel-spectrogram, not raw audio!")
+            print("🔧 LatentSync requires raw audio waveform, not mel-spectrogram")
+            print("🔧 This explains why audio input is silent - we're processing the wrong data!")
+            
+            # 🔧 CRITICAL FIX: Try to get raw audio from source
+            try:
+                # Get the source audio path from state manager
+                source_paths = state_manager.get_item('source_paths', [])
+                source_audio_path = None
+                
+                for path in source_paths:
+                    if has_audio(path):
+                        source_audio_path = path
+                        break
+                
+                if source_audio_path:
+                    print(f"🔧 Attempting to extract raw audio from: {source_audio_path}")
+                    
+                    # Read raw audio at 16kHz for LatentSync
+                    try:
+                        audio_data, sample_rate = sf.read(source_audio_path)
+                        
+                        # Ensure mono
+                        if len(audio_data.shape) > 1:
+                            audio_data = numpy.mean(audio_data, axis=1)
+                        
+                        # Resample to 16kHz if needed
+                        if sample_rate != 16000:
+                            audio_data = resample_audio(audio_data, sample_rate, 16000)
+                        
+                        # Use a reasonable chunk size (1 second)
+                        chunk_size = 16000
+                        if len(audio_data) > chunk_size:
+                            audio_data = audio_data[:chunk_size]
+                        elif len(audio_data) < chunk_size:
+                            # Pad with zeros if too short
+                            audio_data = numpy.pad(audio_data, (0, chunk_size - len(audio_data)), mode='constant')
+                        
+                        audio_input = audio_data.astype(numpy.float32)
+                        
+                        print(f"✅ Successfully extracted raw audio:")
+                        print(f"   - Shape: {audio_input.shape}")
+                        print(f"   - Duration: {len(audio_input) / 16000:.2f} seconds")
+                        print(f"   - RMS: {numpy.sqrt(numpy.mean(audio_input**2)):.6f}")
+                        
+                    except Exception as audio_error:
+                        print(f"❌ Failed to extract raw audio: {audio_error}")
+                        raise audio_error
+                        
+                else:
+                    raise RuntimeError("No audio source found in source_paths")
+                    
+            except Exception as fallback_error:
+                print(f"❌ Raw audio extraction failed: {fallback_error}")
+                print("🔧 EMERGENCY FIX: Generate dummy audio to prevent crash")
+                print("⚠️ Using dummy audio - NO LIP SYNC will occur!")
+                audio_input = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence
         
         # Pass the audio input to process_frame_latentsync for proper handling
         return process_frame_latentsync(target_face, close_vision_frame, audio_input)
@@ -1365,7 +1431,7 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 			print(f"   - Audio chunks available: {len(audio_chunks)}")
 		except Exception as e:
 			print(f"❌ Official audio processing failed: {e}")
-			print(f"🔧 Will fall back to old method per frame")
+			print(f"🔧 Will fall back to raw audio method per frame")
 			audio_chunks = None
 	else:
 		print(f"🔧 Not using official LatentSync audio processing:")
@@ -1382,7 +1448,7 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 		frame_number = queue_payload.get('frame_number')
 		target_vision_path = queue_payload.get('frame_path')
 		
-		# Get appropriate audio frame based on model
+		# 🔧 CRITICAL FIX: Get appropriate audio frame based on model
 		if model_name == 'latentsync':
 			if audio_chunks is not None:
 				# 🔧 CRITICAL FIX: Use frame index instead of frame number
@@ -1398,16 +1464,25 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 					source_audio_frame = torch.zeros(10, 384)  # Official LatentSync slice size
 					print(f"🔍 Frame {frame_number} (index {frame_index}): Using dummy audio slice (beyond audio length)")
 			else:
-				# Fallback to old method if official method failed
-				print(f"⚠️ Falling back to old audio processing for frame {frame_number}")
+				# 🔧 CRITICAL FIX: Use raw audio instead of mel-spectrogram for LatentSync
+				print(f"⚠️ Using raw audio fallback for LatentSync frame {frame_number}")
 				
+				# Get raw audio chunk for this frame
 				source_audio_frame = get_raw_audio_frame(source_audio_path, temp_video_fps, frame_number)
+				
+				if source_audio_frame is None:
+					print(f"❌ Failed to get raw audio for frame {frame_number}")
+					# Create minimal dummy audio
+					source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence
+				else:
+					print(f"✅ Got raw audio for frame {frame_number}: shape {source_audio_frame.shape}, RMS {numpy.sqrt(numpy.mean(source_audio_frame**2)):.6f}")
 			
-			if source_audio_frame is None or (isinstance(source_audio_frame, numpy.ndarray) and not numpy.any(source_audio_frame)):
-				# Create small empty slice for LatentSync
-				source_audio_frame = torch.zeros(10, 384)  # Official LatentSync slice size
+			# 🔧 CRITICAL: Ensure we never pass None or empty audio to LatentSync
+			if source_audio_frame is None:
+				source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)
 		
 		else:
+			# Traditional Wav2Lip: Use mel-spectrogram processing
 			source_audio_frame = get_voice_frame(source_audio_path, temp_video_fps, frame_number)
 			if not numpy.any(source_audio_frame):
 				source_audio_frame = create_empty_audio_frame()
@@ -1730,10 +1805,82 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
     model_size = get_model_options().get('size')
     model_name = state_manager.get_item('lip_syncer_model')
     
-    # Only prepare audio frame for non-latentsync models
-    if model_name != 'latentsync':
+    # 🔧 CRITICAL FIX: Handle LatentSync audio differently from Wav2Lip
+    if model_name == 'latentsync':
+        # LatentSync uses raw audio or pre-computed audio slices, NOT mel-spectrograms
+        print(f"🔧 LatentSync audio processing:")
+        print(f"   - Input type: {type(temp_audio_frame)}")
+        print(f"   - Input shape: {temp_audio_frame.shape if hasattr(temp_audio_frame, 'shape') else 'No shape'}")
+        
+        # Check if this is already a pre-computed audio slice (from official method)
+        if isinstance(temp_audio_frame, torch.Tensor) and temp_audio_frame.dim() == 2 and temp_audio_frame.shape[1] == 384:
+            print(f"✅ Using pre-computed LatentSync audio slice: {temp_audio_frame.shape}")
+            audio_input = temp_audio_frame
+        elif isinstance(temp_audio_frame, numpy.ndarray) and temp_audio_frame.ndim == 1:
+            print(f"✅ Using raw audio waveform: {temp_audio_frame.shape}")
+            audio_input = temp_audio_frame
+        else:
+            print(f"🚨 CRITICAL: Still receiving mel-spectrogram for LatentSync!")
+            print(f"🔧 Shape {temp_audio_frame.shape} indicates mel-spectrogram format")
+            print(f"🔧 LatentSync requires raw audio - extracting from source...")
+            
+            # 🔧 EMERGENCY FIX: Extract raw audio directly from source
+            try:
+                source_paths = state_manager.get_item('source_paths', [])
+                source_audio_path = None
+                
+                for path in source_paths:
+                    if has_audio(path):
+                        source_audio_path = path
+                        break
+                
+                if source_audio_path:
+                    print(f"🔧 Extracting raw audio from: {source_audio_path}")
+                    
+                    # Read raw audio at 16kHz for LatentSync
+                    audio_data, sample_rate = sf.read(source_audio_path)
+                    
+                    # Ensure mono
+                    if len(audio_data.shape) > 1:
+                        audio_data = numpy.mean(audio_data, axis=1)
+                    
+                    # Resample to 16kHz if needed
+                    if sample_rate != 16000:
+                        audio_data = resample_audio(audio_data, sample_rate, 16000)
+                    
+                    # Use a reasonable chunk size (1 second)
+                    chunk_size = 16000
+                    if len(audio_data) > chunk_size:
+                        # Take first second of audio
+                        audio_data = audio_data[:chunk_size]
+                    elif len(audio_data) < chunk_size:
+                        # Pad with zeros if too short
+                        audio_data = numpy.pad(audio_data, (0, chunk_size - len(audio_data)), mode='constant')
+                    
+                    audio_input = audio_data.astype(numpy.float32)
+                    
+                    print(f"✅ Successfully extracted raw audio:")
+                    print(f"   - Shape: {audio_input.shape}")
+                    print(f"   - Duration: {len(audio_input) / 16000:.2f} seconds")
+                    print(f"   - RMS: {numpy.sqrt(numpy.mean(audio_input**2)):.6f}")
+                    
+                    # Verify audio is not silent
+                    if numpy.sqrt(numpy.mean(audio_input**2)) < 0.001:
+                        print(f"⚠️ WARNING: Extracted audio appears silent!")
+                    else:
+                        print(f"✅ Audio extraction successful - non-silent audio detected")
+                        
+                else:
+                    raise RuntimeError("No audio source found in source_paths")
+                    
+            except Exception as audio_error:
+                print(f"❌ Raw audio extraction failed: {audio_error}")
+                print(f"🔧 Creating dummy audio - NO LIP SYNC will occur!")
+                audio_input = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence
+    else:
+        # Traditional Wav2Lip uses mel-spectrograms
         temp_audio_frame = prepare_audio_frame(temp_audio_frame)
-    # 🔧 NOTE: LatentSync handles raw audio internally, skips FaceFusion audio preprocessing
+        audio_input = temp_audio_frame
     
     crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), 'ffhq_512', (512, 512))
     face_landmark_68 = cv2.transform(target_face.landmark_set.get('68').reshape(1, -1, 2), affine_matrix).reshape(-1, 2)
@@ -1748,7 +1895,7 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         print("🔧 LatentSync: Using internal two-stage algorithm (no external processing needed)")
         
         # LatentSync handles everything internally - just call forward()
-        processed_face = forward(temp_audio_frame, crop_vision_frame, target_face)
+        processed_face = forward(audio_input, crop_vision_frame, target_face)
         
         # Check if processing was successful
         if processed_face is None or not isinstance(processed_face, numpy.ndarray):
@@ -1759,51 +1906,60 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
             print(f"⚠️ Unexpected LatentSync output shape: {processed_face.shape}")
             return temp_vision_frame
         
-        # 🔧 CRITICAL DEBUG: Check color channels
-        print(f"🔧 DEBUG - LatentSync output analysis:")
-        print(f"   - Shape: {processed_face.shape}")
-        print(f"   - Dtype: {processed_face.dtype}")
-        print(f"   - Range: [{processed_face.min()}, {processed_face.max()}]")
-        print(f"   - Channel means: R={processed_face[:,:,0].mean():.1f}, G={processed_face[:,:,1].mean():.1f}, B={processed_face[:,:,2].mean():.1f}")
+        # 🔧 DEBUG: Final image analysis - check if mouth region changed
+        print(f"🔧 Decoded image - Shape: {processed_face.shape}, dtype: {processed_face.dtype}, range: [{processed_face.min():.1f}, {processed_face.max():.1f}]")
         
-        # 🔧 CRITICAL DEBUG: Check original crop frame
-        print(f"🔧 DEBUG - Original crop frame analysis:")
-        print(f"   - Shape: {crop_vision_frame.shape}")
-        print(f"   - Dtype: {crop_vision_frame.dtype}")
-        print(f"   - Range: [{crop_vision_frame.min()}, {crop_vision_frame.max()}]")
-        print(f"   - Channel means: R={crop_vision_frame[:,:,0].mean():.1f}, G={crop_vision_frame[:,:,1].mean():.1f}, B={crop_vision_frame[:,:,2].mean():.1f}")
+        # Convert target frame to RGB and resize to match decoded image
+        target_rgb = cv2.cvtColor(crop_vision_frame, cv2.COLOR_BGR2RGB) if len(crop_vision_frame.shape) == 3 else crop_vision_frame
+        target_resized = cv2.resize(target_rgb, (processed_face.shape[1], processed_face.shape[0]))
         
-        # 🔧 CRITICAL FIX: Detect and correct color space issues
-        processed_r_mean = processed_face[:,:,0].mean()
-        processed_g_mean = processed_face[:,:,1].mean()
-        processed_b_mean = processed_face[:,:,2].mean()
+        # Check mouth region difference (approximate mouth area)
+        mouth_y1, mouth_y2 = int(processed_face.shape[0] * 0.6), int(processed_face.shape[0] * 0.85)
+        mouth_x1, mouth_x2 = int(processed_face.shape[1] * 0.3), int(processed_face.shape[1] * 0.7)
         
-        original_r_mean = crop_vision_frame[:,:,0].mean()
-        original_g_mean = crop_vision_frame[:,:,1].mean()
-        original_b_mean = crop_vision_frame[:,:,2].mean()
+        mouth_orig = target_resized[mouth_y1:mouth_y2, mouth_x1:mouth_x2]
+        mouth_proc = processed_face[mouth_y1:mouth_y2, mouth_x1:mouth_x2]
+        mouth_diff = numpy.mean(numpy.abs(mouth_orig.astype(float) - mouth_proc.astype(float)))
         
-        # Check for color channel imbalance (blue dominance in your case)
+        print(f"🔧 Mouth region difference: {mouth_diff:.2f}")
+        if mouth_diff < 5.0:
+            print("⚠️ Very small mouth difference - model may not be generating lip sync")
+        elif mouth_diff > 50.0:
+            print("⚠️ Very large mouth difference - may indicate processing issues")
+
+        # Apply color correction if needed
         color_corrected = False
-        if abs(processed_b_mean - original_b_mean) > 20:  # Blue channel is significantly different
-            print("⚠️ DETECTED: Color channel imbalance - applying correction...")
+        if processed_face.dtype == numpy.uint8:
+            # Check for color imbalance (common issue with LatentSync)
+            r_mean = processed_face[:,:,0].mean()
+            g_mean = processed_face[:,:,1].mean() 
+            b_mean = processed_face[:,:,2].mean()
             
-            # Calculate correction factors
-            r_factor = original_r_mean / max(processed_r_mean, 1)
-            g_factor = original_g_mean / max(processed_g_mean, 1)
-            b_factor = original_b_mean / max(processed_b_mean, 1)
+            print(f"🔧 Channel means - R: {r_mean:.1f}, G: {g_mean:.1f}, B: {b_mean:.1f}")
             
-            print(f"🔧 Color correction factors: R={r_factor:.3f}, G={g_factor:.3f}, B={b_factor:.3f}")
+            # Detect significant color imbalance
+            if abs(r_mean - g_mean) > 20 or abs(r_mean - b_mean) > 20 or abs(g_mean - b_mean) > 20:
+                print("🔧 Applying color correction for channel imbalance...")
+                
+                # Calculate correction factors
+                target_mean = (r_mean + g_mean + b_mean) / 3
+                r_factor = target_mean / max(r_mean, 1)
+                g_factor = target_mean / max(g_mean, 1)
+                b_factor = target_mean / max(b_mean, 1)
+                
+                # Apply correction
+                processed_face_corrected = processed_face.astype(numpy.float32)
+                processed_face_corrected[:,:,0] *= r_factor
+                processed_face_corrected[:,:,1] *= g_factor
+                processed_face_corrected[:,:,2] *= b_factor
+                processed_face_corrected = numpy.clip(processed_face_corrected, 0, 255).astype(numpy.uint8)
+                
+                print(f"🔧 After correction - Channel means: R={processed_face_corrected[:,:,0].mean():.1f}, G={processed_face_corrected[:,:,1].mean():.1f}, B={processed_face_corrected[:,:,2].mean():.1f}")
+                processed_face = processed_face_corrected
+                color_corrected = True
             
-            # Apply color correction
-            processed_face_corrected = processed_face.astype(numpy.float32)
-            processed_face_corrected[:,:,0] *= r_factor
-            processed_face_corrected[:,:,1] *= g_factor
-            processed_face_corrected[:,:,2] *= b_factor
-            processed_face_corrected = numpy.clip(processed_face_corrected, 0, 255).astype(numpy.uint8)
-            
-            print(f"🔧 After correction - Channel means: R={processed_face_corrected[:,:,0].mean():.1f}, G={processed_face_corrected[:,:,1].mean():.1f}, B={processed_face_corrected[:,:,2].mean():.1f}")
-            processed_face = processed_face_corrected
-            color_corrected = True
+        if not color_corrected:
+            print("✅ No color correction needed")
         
         # ===== LATENTSYNC TWO-STAGE ALGORITHM =====
         # Stage 1: Pixel-level masking (mouth region only)
@@ -1952,7 +2108,7 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
         # Wav2Lip processing
         close_vision_frame, close_matrix = warp_face_by_bounding_box(crop_vision_frame, bounding_box, model_size)
         close_vision_frame = prepare_crop_frame(close_vision_frame)
-        close_vision_frame = forward(temp_audio_frame, close_vision_frame, target_face)
+        close_vision_frame = forward(audio_input, close_vision_frame, target_face)
         close_vision_frame = normalize_close_frame(close_vision_frame)
         
         # Check if the model returned a valid frame
