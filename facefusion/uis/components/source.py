@@ -18,8 +18,15 @@ def render() -> None:
 	global SOURCE_AUDIO
 	global SOURCE_IMAGE
 
+	print(f"🔍 DEBUG: source.py render() called")
+	current_source_paths = state_manager.get_item('source_paths')
+	print(f"   - Initial source_paths: {current_source_paths}")
+	
 	has_source_audio = has_audio(state_manager.get_item('source_paths'))
 	has_source_image = has_image(state_manager.get_item('source_paths'))
+	print(f"   - has_source_audio: {has_source_audio}")
+	print(f"   - has_source_image: {has_source_image}")
+	
 	SOURCE_FILE = gradio.File(
 		label = wording.get('uis.source_file'),
 		file_count = 'multiple',
@@ -30,9 +37,14 @@ def render() -> None:
 		],
 		value = state_manager.get_item('source_paths') if has_source_audio or has_source_image else None
 	)
+	print(f"   - SOURCE_FILE created with value: {SOURCE_FILE.value}")
+	
 	source_file_names = [ source_file_value.get('path') for source_file_value in SOURCE_FILE.value ] if SOURCE_FILE.value else None
 	source_audio_path = get_first(filter_audio_paths(source_file_names))
 	source_image_path = get_first(filter_image_paths(source_file_names))
+	print(f"   - source_audio_path: {source_audio_path}")
+	print(f"   - source_image_path: {source_image_path}")
+	
 	SOURCE_AUDIO = gradio.Audio(
 		value = source_audio_path if has_source_audio else None,
 		visible = has_source_audio,
@@ -48,6 +60,7 @@ def render() -> None:
 
 
 def listen() -> None:
+	print(f"🔍 DEBUG: source.py listen() called - registering SOURCE_FILE change handler")
 	SOURCE_FILE.change(update, inputs = SOURCE_FILE, outputs = [ SOURCE_AUDIO, SOURCE_IMAGE ])
 
 
@@ -58,6 +71,36 @@ def update(files : List[File]) -> Tuple[gradio.Audio, gradio.Image]:
 	
 	file_names = [ file.name for file in files ] if files else None
 	print(f"   - file_names: {file_names}")
+	
+	# 🔧 CRITICAL FIX: Copy Gradio temp files to persistent location
+	if file_names:
+		import shutil
+		import tempfile
+		import os
+		
+		persistent_file_names = []
+		for file_name in file_names:
+			if file_name and os.path.exists(file_name):
+				# Create persistent temp file
+				file_ext = os.path.splitext(file_name)[1] or '.tmp'
+				persistent_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+				persistent_path = persistent_file.name
+				persistent_file.close()
+				
+				# Copy the Gradio temp file to persistent location
+				try:
+					shutil.copy2(file_name, persistent_path)
+					persistent_file_names.append(persistent_path)
+					print(f"🔧 Copied {file_name} -> {persistent_path}")
+				except Exception as e:
+					print(f"❌ Failed to copy {file_name}: {e}")
+					persistent_file_names.append(file_name)  # Fallback to original
+			else:
+				print(f"⚠️ File does not exist: {file_name}")
+				persistent_file_names.append(file_name)  # Keep original path
+		
+		file_names = persistent_file_names
+		print(f"   - persistent file_names: {file_names}")
 	
 	has_source_audio = has_audio(file_names)
 	has_source_image = has_image(file_names)
