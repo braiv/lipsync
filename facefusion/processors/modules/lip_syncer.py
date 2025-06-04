@@ -1857,11 +1857,16 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
             # 🔧 EMERGENCY FIX: Extract raw audio directly from source
             try:
                 source_paths = state_manager.get_item('source_paths') or []
+                print(f"🔧 DEBUG sync_lip: source_paths = {source_paths}")
+                print(f"🔧 DEBUG sync_lip: source_paths type = {type(source_paths)}")
                 source_audio_path = None
                 
                 for path in source_paths:
-                    if has_audio(path):
+                    print(f"🔧 DEBUG sync_lip: checking path = {path}")
+                    print(f"🔧 DEBUG sync_lip: path exists = {os.path.exists(path) if path else False}")
+                    if path and has_audio(path):
                         source_audio_path = path
+                        print(f"🔧 DEBUG sync_lip: found audio path = {path}")
                         break
                 
                 if source_audio_path:
