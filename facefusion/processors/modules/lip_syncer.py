@@ -688,7 +688,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
             # 🔧 CRITICAL FIX: Try to get raw audio from source
             try:
                 # Get the source audio path from state manager
-                source_paths = state_manager.get_item('source_paths', [])
+                source_paths = state_manager.get_item('source_paths') or []
                 source_audio_path = None
                 
                 for path in source_paths:
@@ -1856,7 +1856,7 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
             
             # 🔧 EMERGENCY FIX: Extract raw audio directly from source
             try:
-                source_paths = state_manager.get_item('source_paths', [])
+                source_paths = state_manager.get_item('source_paths') or []
                 source_audio_path = None
                 
                 for path in source_paths:
