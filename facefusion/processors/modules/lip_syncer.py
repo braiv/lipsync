@@ -697,46 +697,76 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
                         break
                 
                 if source_audio_path:
-                    print(f"🔧 Attempting to extract raw audio from: {source_audio_path}")
+                    print(f"🔧 Extracting raw audio from: {source_audio_path}")
+                    
+                    # 🔧 DEBUG: Check if file exists and get basic info
+                    if not os.path.exists(source_audio_path):
+                        print(f"❌ Audio file does not exist: {source_audio_path}")
+                        raise FileNotFoundError(f"Audio file not found: {source_audio_path}")
+                    
+                    file_size = os.path.getsize(source_audio_path)
+                    print(f"🔧 Audio file info: size={file_size} bytes, exists={os.path.exists(source_audio_path)}")
                     
                     # Read raw audio at 16kHz for LatentSync
                     try:
                         audio_data, sample_rate = sf.read(source_audio_path)
+                        print(f"🔧 Raw audio loaded: shape={audio_data.shape}, sample_rate={sample_rate}, dtype={audio_data.dtype}")
+                        print(f"🔧 Raw audio stats: mean={audio_data.mean():.6f}, std={audio_data.std():.6f}, range=[{audio_data.min():.6f}, {audio_data.max():.6f}]")
                         
-                        # Ensure mono
-                        if len(audio_data.shape) > 1:
-                            audio_data = numpy.mean(audio_data, axis=1)
+                        # Check if audio is actually silent
+                        audio_rms = numpy.sqrt(numpy.mean(audio_data**2))
+                        print(f"🔧 Raw audio RMS: {audio_rms:.6f}")
                         
-                        # Resample to 16kHz if needed
-                        if sample_rate != 16000:
-                            audio_data = resample_audio(audio_data, sample_rate, 16000)
+                        if audio_rms < 0.001:
+                            print(f"⚠️ WARNING: Source audio file appears to be silent!")
+                            print(f"🔧 This may be the root cause of the lip sync issue")
                         
-                        # Use a reasonable chunk size (1 second)
-                        chunk_size = 16000
-                        if len(audio_data) > chunk_size:
-                            audio_data = audio_data[:chunk_size]
-                        elif len(audio_data) < chunk_size:
-                            # Pad with zeros if too short
-                            audio_data = numpy.pad(audio_data, (0, chunk_size - len(audio_data)), mode='constant')
-                        
-                        audio_input = audio_data.astype(numpy.float32)
-                        
-                        print(f"✅ Successfully extracted raw audio:")
-                        print(f"   - Shape: {audio_input.shape}")
-                        print(f"   - Duration: {len(audio_input) / 16000:.2f} seconds")
-                        print(f"   - RMS: {numpy.sqrt(numpy.mean(audio_input**2)):.6f}")
-                        
-                    except Exception as audio_error:
-                        print(f"❌ Failed to extract raw audio: {audio_error}")
-                        raise audio_error
+                    except Exception as read_error:
+                        print(f"❌ Failed to read audio file: {read_error}")
+                        raise read_error
+                    
+                    # Ensure mono
+                    if len(audio_data.shape) > 1:
+                        print(f"🔧 Converting from {audio_data.shape} to mono")
+                        audio_data = numpy.mean(audio_data, axis=1)
+                    
+                    # Resample to 16kHz if needed
+                    if sample_rate != 16000:
+                        print(f"🔧 Resampling from {sample_rate}Hz to 16000Hz")
+                        audio_data = resample_audio(audio_data, sample_rate, 16000)
+                    
+                    # Use a reasonable chunk size (1 second)
+                    chunk_size = 16000
+                    if len(audio_data) > chunk_size:
+                        # Take first second of audio
+                        print(f"🔧 Truncating audio from {len(audio_data)} to {chunk_size} samples")
+                        audio_data = audio_data[:chunk_size]
+                    elif len(audio_data) < chunk_size:
+                        # Pad with zeros if too short
+                        print(f"🔧 Padding audio from {len(audio_data)} to {chunk_size} samples")
+                        audio_data = numpy.pad(audio_data, (0, chunk_size - len(audio_data)), mode='constant')
+                    
+                    audio_input = audio_data.astype(numpy.float32)
+                    
+                    print(f"✅ Successfully extracted raw audio:")
+                    print(f"   - Shape: {audio_input.shape}")
+                    print(f"   - Duration: {len(audio_input) / 16000:.2f} seconds")
+                    print(f"   - RMS: {numpy.sqrt(numpy.mean(audio_input**2)):.6f}")
+                    
+                    # Verify audio is not silent
+                    if numpy.sqrt(numpy.mean(audio_input**2)) < 0.001:
+                        print(f"⚠️ WARNING: Extracted audio appears silent!")
+                        print(f"🔧 This confirms the source audio file is silent or very quiet")
+                        print(f"🔧 Lip sync will not work with silent audio")
+                    else:
+                        print(f"✅ Audio extraction successful - non-silent audio detected")
                         
                 else:
                     raise RuntimeError("No audio source found in source_paths")
                     
-            except Exception as fallback_error:
-                print(f"❌ Raw audio extraction failed: {fallback_error}")
-                print("🔧 EMERGENCY FIX: Generate dummy audio to prevent crash")
-                print("⚠️ Using dummy audio - NO LIP SYNC will occur!")
+            except Exception as audio_error:
+                print(f"❌ Raw audio extraction failed: {audio_error}")
+                print(f"🔧 Creating dummy audio - NO LIP SYNC will occur!")
                 audio_input = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence
         
         # Pass the audio input to process_frame_latentsync for proper handling
@@ -1476,14 +1506,14 @@ def process_frames(source_paths : List[str], queue_payloads : List[QueuePayload]
 					source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)  # 1 second of silence
 				else:
 					print(f"✅ Got raw audio for frame {frame_number}: shape {source_audio_frame.shape}, RMS {numpy.sqrt(numpy.mean(source_audio_frame**2)):.6f}")
-			
-			# 🔧 CRITICAL: Ensure we never pass None or empty audio to LatentSync
-			if source_audio_frame is None:
-				source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)
 		
-		else:
+		# 🔧 CRITICAL: Ensure we never pass None or empty audio to LatentSync
+		if model_name == 'latentsync' and source_audio_frame is None:
+			source_audio_frame = numpy.zeros(16000, dtype=numpy.float32)
+		elif model_name != 'latentsync':
 			# Traditional Wav2Lip: Use mel-spectrogram processing
-			source_audio_frame = get_voice_frame(source_audio_path, temp_video_fps, frame_number)
+			if source_audio_frame is None:
+				source_audio_frame = get_voice_frame(source_audio_path, temp_video_fps, frame_number)
 			if not numpy.any(source_audio_frame):
 				source_audio_frame = create_empty_audio_frame()
 		
@@ -1837,24 +1867,51 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
                 if source_audio_path:
                     print(f"🔧 Extracting raw audio from: {source_audio_path}")
                     
-                    # Read raw audio at 16kHz for LatentSync
-                    audio_data, sample_rate = sf.read(source_audio_path)
+                    # 🔧 DEBUG: Check if file exists and get basic info
+                    if not os.path.exists(source_audio_path):
+                        print(f"❌ Audio file does not exist: {source_audio_path}")
+                        raise FileNotFoundError(f"Audio file not found: {source_audio_path}")
                     
+                    file_size = os.path.getsize(source_audio_path)
+                    print(f"🔧 Audio file info: size={file_size} bytes, exists={os.path.exists(source_audio_path)}")
+                    
+                    # Read raw audio at 16kHz for LatentSync
+                    try:
+                        audio_data, sample_rate = sf.read(source_audio_path)
+                        print(f"🔧 Raw audio loaded: shape={audio_data.shape}, sample_rate={sample_rate}, dtype={audio_data.dtype}")
+                        print(f"🔧 Raw audio stats: mean={audio_data.mean():.6f}, std={audio_data.std():.6f}, range=[{audio_data.min():.6f}, {audio_data.max():.6f}]")
+                        
+                        # Check if audio is actually silent
+                        audio_rms = numpy.sqrt(numpy.mean(audio_data**2))
+                        print(f"🔧 Raw audio RMS: {audio_rms:.6f}")
+                        
+                        if audio_rms < 0.001:
+                            print(f"⚠️ WARNING: Source audio file appears to be silent!")
+                            print(f"🔧 This may be the root cause of the lip sync issue")
+                        
+                    except Exception as read_error:
+                        print(f"❌ Failed to read audio file: {read_error}")
+                        raise read_error
+                        
                     # Ensure mono
                     if len(audio_data.shape) > 1:
+                        print(f"🔧 Converting from {audio_data.shape} to mono")
                         audio_data = numpy.mean(audio_data, axis=1)
                     
                     # Resample to 16kHz if needed
                     if sample_rate != 16000:
+                        print(f"🔧 Resampling from {sample_rate}Hz to 16000Hz")
                         audio_data = resample_audio(audio_data, sample_rate, 16000)
                     
                     # Use a reasonable chunk size (1 second)
                     chunk_size = 16000
                     if len(audio_data) > chunk_size:
                         # Take first second of audio
+                        print(f"🔧 Truncating audio from {len(audio_data)} to {chunk_size} samples")
                         audio_data = audio_data[:chunk_size]
                     elif len(audio_data) < chunk_size:
                         # Pad with zeros if too short
+                        print(f"🔧 Padding audio from {len(audio_data)} to {chunk_size} samples")
                         audio_data = numpy.pad(audio_data, (0, chunk_size - len(audio_data)), mode='constant')
                     
                     audio_input = audio_data.astype(numpy.float32)
@@ -1867,6 +1924,8 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
                     # Verify audio is not silent
                     if numpy.sqrt(numpy.mean(audio_input**2)) < 0.001:
                         print(f"⚠️ WARNING: Extracted audio appears silent!")
+                        print(f"🔧 This confirms the source audio file is silent or very quiet")
+                        print(f"🔧 Lip sync will not work with silent audio")
                     else:
                         print(f"✅ Audio extraction successful - non-silent audio detected")
                         
