@@ -57,9 +57,9 @@ def render() -> None:
 			temp_audio_frame = get_raw_audio_frame(source_audio_path, state_manager.get_item('output_video_fps'), state_manager.get_item('reference_frame_number'))
 			if temp_audio_frame is not None and numpy.any(temp_audio_frame):
 				source_audio_frame = temp_audio_frame
-				print(f"🔧 Preview: Using raw audio for LatentSync: shape={temp_audio_frame.shape}, RMS={numpy.sqrt(numpy.mean(temp_audio_frame**2)):.6f}")
+				print(f"🔧 Preview render: Using raw audio for LatentSync: shape={temp_audio_frame.shape}, RMS={numpy.sqrt(numpy.mean(temp_audio_frame**2)):.6f}")
 			else:
-				print(f"⚠️ Preview: Failed to get raw audio for LatentSync, using empty frame")
+				print(f"⚠️ Preview render: Failed to get raw audio for LatentSync, using empty frame")
 		else:
 			# Traditional models use mel-spectrograms
 			temp_audio_frame = get_audio_frame(source_audio_path, state_manager.get_item('output_video_fps'), state_manager.get_item('reference_frame_number'))
