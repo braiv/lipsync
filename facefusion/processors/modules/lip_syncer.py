@@ -692,8 +692,29 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
                 source_audio_path = None
                 
                 for path in source_paths:
-                    if has_audio(path):
+                    print(f"🔧 DEBUG sync_lip: checking path = {path}")
+                    print(f"🔧 DEBUG sync_lip: path exists = {os.path.exists(path) if path else False}")
+                    
+                    # 🔧 CRITICAL FIX: More lenient audio detection for temp files
+                    is_audio_file = False
+                    if path and os.path.exists(path):
+                        # Try strict audio detection first
+                        if has_audio([path]):
+                            is_audio_file = True
+                            print(f"🔧 DEBUG sync_lip: has_audio() = True")
+                        else:
+                            # Fallback: Check file extension for temp files
+                            audio_extensions = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac']
+                            file_ext = os.path.splitext(path)[1].lower()
+                            if file_ext in audio_extensions:
+                                is_audio_file = True
+                                print(f"🔧 DEBUG sync_lip: has_audio() = False, but extension {file_ext} suggests audio file")
+                            else:
+                                print(f"🔧 DEBUG sync_lip: has_audio() = False, extension {file_ext} not recognized")
+                    
+                    if is_audio_file:
                         source_audio_path = path
+                        print(f"🔧 DEBUG sync_lip: found audio path = {path}")
                         break
                 
                 if source_audio_path:
@@ -724,7 +745,7 @@ def forward(temp_audio_frame: AudioFrame, close_vision_frame: VisionFrame, targe
                     except Exception as read_error:
                         print(f"❌ Failed to read audio file: {read_error}")
                         raise read_error
-                    
+                        
                     # Ensure mono
                     if len(audio_data.shape) > 1:
                         print(f"🔧 Converting from {audio_data.shape} to mono")
@@ -1864,7 +1885,25 @@ def sync_lip(target_face: Face, temp_audio_frame: AudioFrame, temp_vision_frame:
                 for path in source_paths:
                     print(f"🔧 DEBUG sync_lip: checking path = {path}")
                     print(f"🔧 DEBUG sync_lip: path exists = {os.path.exists(path) if path else False}")
-                    if path and has_audio(path):
+                    
+                    # 🔧 CRITICAL FIX: More lenient audio detection for temp files
+                    is_audio_file = False
+                    if path and os.path.exists(path):
+                        # Try strict audio detection first
+                        if has_audio([path]):
+                            is_audio_file = True
+                            print(f"🔧 DEBUG sync_lip: has_audio() = True")
+                        else:
+                            # Fallback: Check file extension for temp files
+                            audio_extensions = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac']
+                            file_ext = os.path.splitext(path)[1].lower()
+                            if file_ext in audio_extensions:
+                                is_audio_file = True
+                                print(f"🔧 DEBUG sync_lip: has_audio() = False, but extension {file_ext} suggests audio file")
+                            else:
+                                print(f"🔧 DEBUG sync_lip: has_audio() = False, extension {file_ext} not recognized")
+                    
+                    if is_audio_file:
                         source_audio_path = path
                         print(f"🔧 DEBUG sync_lip: found audio path = {path}")
                         break
