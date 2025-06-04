@@ -52,13 +52,33 @@ def listen() -> None:
 
 
 def update(files : List[File]) -> Tuple[gradio.Audio, gradio.Image]:
+	print(f"🔍 DEBUG source.py update called:")
+	print(f"   - files: {files}")
+	print(f"   - files type: {type(files)}")
+	
 	file_names = [ file.name for file in files ] if files else None
+	print(f"   - file_names: {file_names}")
+	
 	has_source_audio = has_audio(file_names)
 	has_source_image = has_image(file_names)
+	print(f"   - has_source_audio: {has_source_audio}")
+	print(f"   - has_source_image: {has_source_image}")
+	
 	if has_source_audio or has_source_image:
 		source_audio_path = get_first(filter_audio_paths(file_names))
 		source_image_path = get_first(filter_image_paths(file_names))
+		print(f"   - source_audio_path: {source_audio_path}")
+		print(f"   - source_image_path: {source_image_path}")
+		
+		print(f"🔧 Setting source_paths to: {file_names}")
 		state_manager.set_item('source_paths', file_names)
+		
+		# Verify it was set
+		current_source_paths = state_manager.get_item('source_paths')
+		print(f"✅ Verified source_paths set to: {current_source_paths}")
+		
 		return gradio.Audio(value = source_audio_path, visible = has_source_audio), gradio.Image(value = source_image_path, visible = has_source_image)
+	
+	print(f"⚠️ No valid audio or image files found, clearing source_paths")
 	state_manager.clear_item('source_paths')
 	return gradio.Audio(value = None, visible = False), gradio.Image(value = None, visible = False)
