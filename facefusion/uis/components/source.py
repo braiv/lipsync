@@ -77,24 +77,88 @@ def update(files : List[File]) -> Tuple[gradio.Audio, gradio.Image]:
 		import shutil
 		import tempfile
 		import os
+		import subprocess
 		
 		persistent_file_names = []
 		for file_name in file_names:
 			if file_name and os.path.exists(file_name):
-				# Create persistent temp file
-				file_ext = os.path.splitext(file_name)[1] or '.tmp'
-				persistent_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
-				persistent_path = persistent_file.name
-				persistent_file.close()
+				file_ext = os.path.splitext(file_name)[1].lower()
 				
-				# Copy the Gradio temp file to persistent location
-				try:
-					shutil.copy2(file_name, persistent_path)
-					persistent_file_names.append(persistent_path)
-					print(f"🔧 Copied {file_name} -> {persistent_path}")
-				except Exception as e:
-					print(f"❌ Failed to copy {file_name}: {e}")
-					persistent_file_names.append(file_name)  # Fallback to original
+				# 🔧 AUDIO CONVERSION FIX: Convert audio files to clean WAV format
+				if file_ext in ['.mp3', '.m4a', '.aac', '.ogg', '.flac', '.wav']:
+					print(f"🔧 Audio file detected: {file_name} ({file_ext})")
+					
+					# Create persistent WAV file
+					persistent_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+					persistent_path = persistent_file.name
+					persistent_file.close()
+					
+					# Convert to 16kHz mono WAV using FFmpeg
+					try:
+						ffmpeg_cmd = [
+							'ffmpeg', '-y', '-i', file_name,
+							'-ar', '16000',  # 16kHz sample rate
+							'-ac', '1',      # Mono
+							'-f', 'wav',     # WAV format
+							'-acodec', 'pcm_s16le',  # 16-bit PCM
+							persistent_path
+						]
+						
+						print(f"🔧 Converting audio: {file_ext} → WAV (16kHz mono)")
+						result = subprocess.run(ffmpeg_cmd, capture_output=True, capture_stderr=True, text=True)
+						
+						if result.returncode == 0:
+							persistent_file_names.append(persistent_path)
+							print(f"🔧 Audio converted: {file_name} → {persistent_path}")
+							
+							# Verify the converted file
+							if os.path.exists(persistent_path) and os.path.getsize(persistent_path) > 0:
+								print(f"✅ Converted WAV file verified: {os.path.getsize(persistent_path)} bytes")
+							else:
+								print(f"❌ Converted WAV file verification failed")
+								persistent_file_names.pop()  # Remove from list
+								persistent_file_names.append(file_name)  # Fallback to original
+						else:
+							print(f"❌ FFmpeg conversion failed: {result.stderr}")
+							print(f"🔧 Falling back to direct copy")
+							os.unlink(persistent_path)  # Remove failed WAV file
+							
+							# Fallback to direct copy
+							file_ext = os.path.splitext(file_name)[1] or '.tmp'
+							persistent_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+							persistent_path = persistent_file.name
+							persistent_file.close()
+							shutil.copy2(file_name, persistent_path)
+							persistent_file_names.append(persistent_path)
+							print(f"🔧 Direct copy fallback: {file_name} → {persistent_path}")
+							
+					except Exception as e:
+						print(f"❌ Audio conversion error: {e}")
+						print(f"🔧 Falling back to direct copy")
+						
+						# Fallback to direct copy
+						file_ext = os.path.splitext(file_name)[1] or '.tmp'
+						persistent_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+						persistent_path = persistent_file.name
+						persistent_file.close()
+						shutil.copy2(file_name, persistent_path)
+						persistent_file_names.append(persistent_path)
+						print(f"🔧 Direct copy fallback: {file_name} → {persistent_path}")
+				else:
+					# For non-audio files (images), use direct copy
+					file_ext = os.path.splitext(file_name)[1] or '.tmp'
+					persistent_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+					persistent_path = persistent_file.name
+					persistent_file.close()
+					
+					# Copy the file to persistent location
+					try:
+						shutil.copy2(file_name, persistent_path)
+						persistent_file_names.append(persistent_path)
+						print(f"🔧 Copied: {file_name} → {persistent_path}")
+					except Exception as e:
+						print(f"❌ Failed to copy {file_name}: {e}")
+						persistent_file_names.append(file_name)  # Fallback to original
 			else:
 				print(f"⚠️ File does not exist: {file_name}")
 				persistent_file_names.append(file_name)  # Keep original path
