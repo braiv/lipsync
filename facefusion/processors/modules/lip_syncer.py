@@ -105,7 +105,7 @@ PERFORMANCE_CONFIGS = {
     "fast_quality": {
         "resolution": 512,          # Full resolution for quality
         "num_inference_steps": 12,  # Reduced steps for speed
-        "guidance_scale": 3.5,      # Full CFG for good lip sync
+        "guidance_scale": 5,      # Full CFG for good lip sync
         "enable_vae_slicing": True, # Enable for memory efficiency
         "use_fp16": True,           # Enable for speed
         "batch_optimization": True  # Enable for efficiency
