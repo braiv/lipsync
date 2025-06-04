@@ -6,7 +6,7 @@ import gradio
 import numpy
 
 from facefusion import logger, process_manager, state_manager, wording
-from facefusion.audio import create_empty_audio_frame, get_audio_frame
+from facefusion.audio import create_empty_audio_frame, get_audio_frame, get_raw_audio_frame
 from facefusion.common_helper import get_first
 from facefusion.content_analyser import analyse_frame
 from facefusion.core import conditional_append_reference_faces
@@ -49,9 +49,22 @@ def render() -> None:
 	source_audio_frame = create_empty_audio_frame()
 
 	if source_audio_path and state_manager.get_item('output_video_fps') and state_manager.get_item('reference_frame_number'):
-		temp_audio_frame = get_audio_frame(source_audio_path, state_manager.get_item('output_video_fps'), state_manager.get_item('reference_frame_number'))
-		if numpy.any(temp_audio_frame):
-			source_audio_frame = temp_audio_frame
+		# 🔧 CRITICAL FIX: Use appropriate audio format based on lip syncer model
+		model_name = state_manager.get_item('lip_syncer_model')
+		
+		if model_name == 'latentsync':
+			# LatentSync needs raw audio, not mel-spectrograms
+			temp_audio_frame = get_raw_audio_frame(source_audio_path, state_manager.get_item('output_video_fps'), state_manager.get_item('reference_frame_number'))
+			if temp_audio_frame is not None and numpy.any(temp_audio_frame):
+				source_audio_frame = temp_audio_frame
+				print(f"🔧 Preview: Using raw audio for LatentSync: shape={temp_audio_frame.shape}, RMS={numpy.sqrt(numpy.mean(temp_audio_frame**2)):.6f}")
+			else:
+				print(f"⚠️ Preview: Failed to get raw audio for LatentSync, using empty frame")
+		else:
+			# Traditional models use mel-spectrograms
+			temp_audio_frame = get_audio_frame(source_audio_path, state_manager.get_item('output_video_fps'), state_manager.get_item('reference_frame_number'))
+			if numpy.any(temp_audio_frame):
+				source_audio_frame = temp_audio_frame
 
 	if is_image(state_manager.get_item('target_path')):
 		target_vision_frame = read_static_image(state_manager.get_item('target_path'))
@@ -208,12 +221,22 @@ def update_preview_image(frame_number : int = 0) -> gradio.Image:
 	source_audio_frame = create_empty_audio_frame()
 
 	if source_audio_path and state_manager.get_item('output_video_fps') and state_manager.get_item('reference_frame_number'):
-		reference_audio_frame_number = state_manager.get_item('reference_frame_number')
-		if state_manager.get_item('trim_frame_start'):
-			reference_audio_frame_number -= state_manager.get_item('trim_frame_start')
-		temp_audio_frame = get_audio_frame(source_audio_path, state_manager.get_item('output_video_fps'), reference_audio_frame_number)
-		if numpy.any(temp_audio_frame):
-			source_audio_frame = temp_audio_frame
+		# 🔧 CRITICAL FIX: Use appropriate audio format based on lip syncer model
+		model_name = state_manager.get_item('lip_syncer_model')
+		
+		if model_name == 'latentsync':
+			# LatentSync needs raw audio, not mel-spectrograms
+			temp_audio_frame = get_raw_audio_frame(source_audio_path, state_manager.get_item('output_video_fps'), state_manager.get_item('reference_frame_number'))
+			if temp_audio_frame is not None and numpy.any(temp_audio_frame):
+				source_audio_frame = temp_audio_frame
+				print(f"🔧 Preview: Using raw audio for LatentSync: shape={temp_audio_frame.shape}, RMS={numpy.sqrt(numpy.mean(temp_audio_frame**2)):.6f}")
+			else:
+				print(f"⚠️ Preview: Failed to get raw audio for LatentSync, using empty frame")
+		else:
+			# Traditional models use mel-spectrograms
+			temp_audio_frame = get_audio_frame(source_audio_path, state_manager.get_item('output_video_fps'), state_manager.get_item('reference_frame_number'))
+			if numpy.any(temp_audio_frame):
+				source_audio_frame = temp_audio_frame
 
 	if is_image(state_manager.get_item('target_path')):
 		target_vision_frame = read_static_image(state_manager.get_item('target_path'))
