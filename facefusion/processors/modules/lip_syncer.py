@@ -980,8 +980,8 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                         do_classifier_free_guidance = False
                         guidance_scale = 1.0
                     else:
-                        # Create unconditional (empty) audio embedding
-                        uncond_audio_embeds = torch.zeros_like(audio_embeds)
+                        # 🔧 CRITICAL FIX: Create proper unconditional audio (NOT zeros)
+                        uncond_audio_embeds = torch.randn_like(audio_embeds) * 0.01  # Small noise
                         audio_embeds = torch.cat([uncond_audio_embeds, audio_embeds])
                         print(f"🔧 CFG enabled - doubled embeddings to: {audio_embeds.shape}")
                         
@@ -1067,58 +1067,84 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                 for i, t in enumerate(timesteps):
                     print(f"  Step {i+1}/{num_inference_steps} (t={t})")
                     
-                    # Expand latents for CFG
-                    latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+                    def apply_cfg_correctly(latents, audio_embeds, mask_latents, masked_image_latents, ref_latents, guidance_scale):
+                        """Apply CFG correctly as requested by user"""
+                        do_classifier_free_guidance = guidance_scale > 1.0
+                        
+                        if do_classifier_free_guidance:
+                            # 1. Audio embeddings are already doubled from above (uncond + cond)
+                            
+                            # 2. Double all other inputs
+                            latents_doubled = torch.cat([latents, latents])
+                            masks_doubled = torch.cat([mask_latents, mask_latents])
+                            masked_images_doubled = torch.cat([masked_image_latents, masked_image_latents])  
+                            ref_images_doubled = torch.cat([ref_latents, ref_latents])
+                            
+                            # Scale model input (official scheduler scaling)
+                            latents_doubled = scheduler.scale_model_input(latents_doubled, t)
+                            latents_doubled = latents_doubled.to(dtype=target_dtype)
+                            
+                            # Ensure all conditioning inputs are in target dtype
+                            masks_doubled = masks_doubled.to(dtype=target_dtype)
+                            masked_images_doubled = masked_images_doubled.to(dtype=target_dtype)
+                            ref_images_doubled = ref_images_doubled.to(dtype=target_dtype)
+                            
+                            # Concatenate all inputs (official order)
+                            unet_input = torch.cat([
+                                latents_doubled,
+                                masks_doubled,
+                                masked_images_doubled,
+                                ref_images_doubled
+                            ], dim=1)
+                            
+                            # Final dtype check before UNet forward
+                            unet_input = unet_input.to(dtype=target_dtype)
+                            audio_embeds_input = audio_embeds.to(dtype=target_dtype)
+                            
+                            # 3. Single UNet forward pass
+                            noise_pred = unet_model(
+                                sample=unet_input,
+                                timestep=t,
+                                encoder_hidden_states=audio_embeds_input
+                            ).sample
+                            
+                            # 4. Split and apply CFG
+                            noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                            final_noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                            
+                            return final_noise_pred
+                        else:
+                            # No CFG - single forward pass
+                            latents_input = scheduler.scale_model_input(latents, t)
+                            latents_input = latents_input.to(dtype=target_dtype)
+                            
+                            # Ensure all conditioning inputs are in target dtype
+                            mask_latents = mask_latents.to(dtype=target_dtype)
+                            masked_image_latents = masked_image_latents.to(dtype=target_dtype)
+                            ref_latents = ref_latents.to(dtype=target_dtype)
+                            
+                            # Concatenate all inputs (official order)
+                            unet_input = torch.cat([
+                                latents_input,
+                                mask_latents,
+                                masked_image_latents,
+                                ref_latents
+                            ], dim=1)
+                            
+                            # Final dtype check before UNet forward
+                            unet_input = unet_input.to(dtype=target_dtype)
+                            audio_embeds_input = audio_embeds.to(dtype=target_dtype)
+                            
+                            return unet_model(
+                                sample=unet_input,
+                                timestep=t,
+                                encoder_hidden_states=audio_embeds_input
+                            ).sample
                     
-                    # Scale model input (official scheduler scaling)
-                    latent_model_input = scheduler.scale_model_input(latent_model_input, t)
-                    
-                    # 🚀 PERFORMANCE: Ensure latent input is in target dtype
-                    latent_model_input = latent_model_input.to(dtype=target_dtype)
-                    
-                    # Prepare conditioning inputs
-                    if do_classifier_free_guidance:
-                        # Duplicate conditioning for CFG
-                        mask_input = torch.cat([mask_latents] * 2)
-                        masked_img_input = torch.cat([masked_image_latents] * 2)
-                        ref_input = torch.cat([ref_latents] * 2)
-                    else:
-                        mask_input = mask_latents
-                        masked_img_input = masked_image_latents
-                        ref_input = ref_latents
-                    
-                    # 🚀 PERFORMANCE: Ensure all conditioning inputs are in target dtype
-                    mask_input = mask_input.to(dtype=target_dtype)
-                    masked_img_input = masked_img_input.to(dtype=target_dtype)
-                    ref_input = ref_input.to(dtype=target_dtype)
-                    
-                    # Concatenate all inputs (official order)
-                    print(f"🔧 UNet input shapes before concatenation:")
-                    print(f"   - latent_model_input: {latent_model_input.shape}")
-                    print(f"   - mask_input: {mask_input.shape}")
-                    print(f"   - masked_img_input: {masked_img_input.shape}")
-                    print(f"   - ref_input: {ref_input.shape}")
-                    
-                    unet_input = torch.cat([
-                        latent_model_input,
-                        mask_input,
-                        masked_img_input,
-                        ref_input
-                    ], dim=1)
-                    
-                    print(f"🔧 Final UNet input shape: {unet_input.shape}")
-                    print(f"🔧 Audio embeddings shape: {audio_embeds.shape}")
-                    
-                    # 🚀 PERFORMANCE: Final dtype check before UNet forward
-                    unet_input = unet_input.to(dtype=target_dtype)
-                    audio_embeds_input = audio_embeds.to(dtype=target_dtype)
-                    
-                    # UNet forward pass
-                    noise_pred = unet_model(
-                        sample=unet_input,
-                        timestep=t,
-                        encoder_hidden_states=audio_embeds_input
-                    ).sample
+                    # Apply the corrected CFG algorithm
+                    noise_pred = apply_cfg_correctly(
+                        latents, audio_embeds, mask_latents, masked_image_latents, ref_latents, guidance_scale
+                    )
                     
                     # 🔧 CRITICAL DEBUG: Check UNet output quality
                     if i == 0:  # Only debug first step to avoid spam
@@ -1137,21 +1163,14 @@ def process_frame_latentsync(source_face: Face, target_frame: VisionFrame, audio
                             print("🔧 This may indicate poor audio conditioning")
                         else:
                             print("✅ UNet output appears to have meaningful content")
-                    
-                    # Apply classifier-free guidance
-                    if do_classifier_free_guidance:
-                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
                         
-                        # 🔧 CRITICAL DEBUG: Check CFG effect
-                        if i == 0:  # Only debug first step
+                        # 🔧 CRITICAL DEBUG: Check CFG effect if enabled
+                        if do_classifier_free_guidance:
                             print(f"🔧 DEBUG - CFG effect analysis:")
-                            print(f"   - Unconditional mean: {noise_pred_uncond.mean():.6f}")
-                            print(f"   - Conditional mean: {noise_pred_text.mean():.6f}")
-                            print(f"   - Difference: {(noise_pred_text - noise_pred_uncond).mean():.6f}")
+                            print(f"   - Guidance scale: {guidance_scale}")
                             print(f"   - Final guided mean: {noise_pred.mean():.6f}")
                             
-                            cfg_effect = (noise_pred_text - noise_pred_uncond).abs().mean()
+                            cfg_effect = noise_pred.std()
                             print(f"   - CFG effect magnitude: {cfg_effect:.6f}")
                             
                             if cfg_effect < 0.001:
